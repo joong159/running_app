@@ -5,15 +5,15 @@ import 'package:flutter_naver_map/flutter_naver_map.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 최신 방식의 초기화 (경고가 사라집니다)
+  // 초기화 완료를 기다린 후 앱을 실행합니다.
   await NaverMapSdk.instance.initialize(
-    clientId: 'fk2ymrgrxq',
-    onAuthFailed: (ex) {
-      debugPrint("네이버 지도 인증 실패: $ex");
+    clientId: 'e4er7uvr2b', // 네이버 클라우드 플랫폼에서 발급받은 클라이언트 ID로 변경하세요.
+    onAuthFailed: (error) {
+      debugPrint("인증 실패 사유: ${error.message}, 코드: ${error.code}");
     },
   );
 
-  runApp(const JoggingApp()); // 이름을 JoggingApp으로 통일!
+  runApp(const JoggingApp());
 }
 
 class JoggingApp extends StatelessWidget {

@@ -2,6 +2,8 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+        // 아래 한 줄을 반드시 추가해주세요! (네이버 지도 전용 저장소)
+        maven { url = uri("https://repository.map.naver.com/archive/maven") }
     }
 }
 
