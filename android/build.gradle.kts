@@ -1,24 +1,28 @@
+// Project-level build.gradle.kts
+
 allprojects {
     repositories {
         google()
         mavenCentral()
-        // 아래 한 줄을 반드시 추가해주세요! (네이버 지도 전용 저장소)
-        maven { url = uri("https://repository.map.naver.com/archive/maven") }
+        // 네이버 지도 저장소 (최신 주소 및 Kotlin DSL 문법)
+        maven {
+            url = uri("https://naver.jfrog.io/artifactory/maven/")
+        }
     }
 }
 
-val newBuildDir: Directory =
-    rootProject.layout.buildDirectory
-        .dir("../../build")
-        .get()
+// 빌드 디렉토리 설정 (기존에 작성하신 로직 유지)
+val newBuildDir: Directory = rootProject.layout.buildDirectory
+    .dir("../../build")
+    .get()
 rootProject.layout.buildDirectory.value(newBuildDir)
 
 subprojects {
     val newSubprojectBuildDir: Directory = newBuildDir.dir(project.name)
     project.layout.buildDirectory.value(newSubprojectBuildDir)
-}
-subprojects {
-    project.evaluationDependsOn(":app")
+    
+    // 추가: 모든 서브프로젝트에 대해 평가 의존성 설정
+    evaluationDependsOn(":app")
 }
 
 tasks.register<Delete>("clean") {
