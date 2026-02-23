@@ -17,16 +17,14 @@ void main() async {
 }
 
 /// 네이버 지도 SDK 초기화
-/// 401 인증 실패 시 debugPrint로 에러 메시지 출력
 Future<void> _initNaverMapSdk() async {
   try {
     await NaverMapSdk.instance.initialize(
       clientId: 'e4er7uvr2b', // 네이버 클라우드 플랫폼 Client ID
       onAuthFailed: (error) {
         debugPrint('[NaverMap] ❌ 인증 실패 (401): $error');
-        debugPrint(
-          '[NaverMap] Client ID 또는 앱 패키지명(com.example.running_app)을 확인하세요.',
-        );
+        // ✅ 안내 문구를 새로운 패키지명인 com.gaongil로 수정했습니다.
+        debugPrint('[NaverMap] Client ID 또는 앱 패키지명(com.gaongil)을 확인하세요.');
       },
     );
     debugPrint('[NaverMap] ✅ SDK 초기화 성공');
@@ -44,7 +42,7 @@ class RunningApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '조깅 경로 앱',
+      title: '가온길', // ✅ 앱 타이틀도 '가온길'로 수정했습니다.
       debugShowCheckedModeBanner: false,
       theme: ThemeData(colorSchemeSeed: Colors.green, useMaterial3: true),
       home: const AppEntryPoint(),
