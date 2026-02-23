@@ -17,35 +17,30 @@ import '../models/jog_route.dart';
 class RoutePainter {
   RoutePainter._();
 
-  static const String _overlayId = 'jog_route_polyline';
-
   /// 경로를 지도에 그립니다.
   /// points가 2개 미만이면 그리지 않습니다.
-  static Future<void> drawRoute(
-    NaverMapController controller,
-    JogRoute route, {
-    Color lineColor = Colors.blue,
-    double lineWidth = 5.0,
-  }) async {
+  static void drawRoute(NaverMapController controller, JogRoute route) {
     if (route.points.length < 2) return;
 
-    // 기존 Polyline 제거 후 새로 그리기
-    await clearRoute(controller);
-
-    final polyline = NPolylineOverlay(
-      id: _overlayId,
+    // NPathOverlay 생성 (경로선)
+    // id가 같으면 기존 오버레이를 자동으로 갱신(업데이트)합니다.
+    final pathOverlay = NPathOverlay(
+      id: 'jogging_path',
       coords: route.points,
-      color: lineColor,
-      width: lineWidth,
+      width: 10, // 경로 두께
+      color: Colors.green, // 경로 색상
+      outlineWidth: 2, // 테두리 두께
+      outlineColor: Colors.white, // 테두리 색상
     );
 
-    await controller.addOverlay(polyline);
-    debugPrint('[RoutePainter] 경로 그리기 완료. 포인트 수: ${route.points.length}');
+    // 지도에 추가
+    controller.addOverlay(pathOverlay);
   }
 
   /// 지도에서 경로 Polyline을 제거합니다.
-  static Future<void> clearRoute(NaverMapController controller) async {
-    await controller.clearOverlays(type: NOverlayType.polylineOverlay);
-    debugPrint('[RoutePainter] 경로 제거 완료');
+  static void clearRoute(NaverMapController controller) {
+    controller.deleteOverlay(
+      const NOverlayInfo(type: NOverlayType.pathOverlay, id: 'jogging_path'),
+    );
   }
 }

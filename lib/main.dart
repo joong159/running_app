@@ -8,10 +8,8 @@ import 'services/location_service.dart';
 // ─────────────────────────────────────────────
 // 앱 진입점
 // ─────────────────────────────────────────────
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-
-  await _initNaverMapSdk();
 
   runApp(const RunningApp());
 }
@@ -22,7 +20,21 @@ Future<void> _initNaverMapSdk() async {
     // 초기화 전에 이 문구가 터미널에 찍히는지 확인용
     debugPrint('[NaverMap] SDK 초기화 시작...');
 
-    await NaverMapSdk.instance.initialize(clientId: 'e4er7uvr2b');
+    await NaverMapSdk.instance.initialize(
+      clientId: 'e4er7uvr2b',
+      onAuthFailed: (ex) {
+        // 예제 코드의 상세 에러 처리 로직 적용
+        if (ex is NQuotaExceededException) {
+          debugPrint('[NaverMap] ❌ 사용량 초과: ${ex.message}');
+        } else if (ex is NUnauthorizedClientException ||
+            ex is NClientUnspecifiedException ||
+            ex is NAnotherAuthFailedException) {
+          debugPrint('[NaverMap] ❌ 인증 실패: $ex');
+        } else {
+          debugPrint('[NaverMap] ❌ 알 수 없는 인증 오류: $ex');
+        }
+      },
+    );
 
     debugPrint('[NaverMap] ✅ SDK 초기화 성공');
   } catch (e) {
@@ -64,10 +76,14 @@ class _AppEntryPointState extends State<AppEntryPoint> {
   @override
   void initState() {
     super.initState();
-    _requestLocationPermission();
+    _initializeApp();
   }
 
-  Future<void> _requestLocationPermission() async {
+  Future<void> _initializeApp() async {
+    // 1. 네이버 지도 SDK 초기화 (UI가 뜬 상태에서 진행)
+    await _initNaverMapSdk();
+
+    // 2. 위치 권한 요청
     final granted = await LocationService.requestPermission();
     if (mounted) {
       setState(() {
@@ -87,7 +103,7 @@ class _AppEntryPointState extends State<AppEntryPoint> {
       return _PermissionDeniedScreen(
         onRetry: () {
           setState(() => _isLoading = true);
-          _requestLocationPermission();
+          _initializeApp();
         },
       );
     }
@@ -102,7 +118,7 @@ class _AppEntryPointState extends State<AppEntryPoint> {
 class _PermissionDeniedScreen extends StatelessWidget {
   final VoidCallback onRetry;
 
-  const _PermissionDeniedScreen({required this.onRetry});
+  const _PermissionDeniedScreen({super.key, required this.onRetry});
 
   @override
   Widget build(BuildContext context) {

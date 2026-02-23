@@ -24,7 +24,7 @@ android {
         applicationId = "com.gaongil"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        minSdk = flutter.minSdkVersion // 네이버 지도 SDK는 최소 21 이상 필요합니다.
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName

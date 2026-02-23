@@ -65,6 +65,19 @@ class _MapScreenState extends State<MapScreen> {
 
     // 내 위치 레이어(Blue Dot) 활성화
     controller.setLocationTrackingMode(NLocationTrackingMode.follow);
+
+    // 💡 [API 예제] 마커 생성 및 클릭 리스너 추가
+    final marker = NMarker(
+      id: 'example_marker',
+      position: const NLatLng(37.5670135, 126.9783740),
+      caption: const NOverlayCaption(text: "클릭해보세요"),
+    );
+    marker.setOnTapListener((overlay) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text("마커 클릭됨")));
+    });
+    controller.addOverlay(marker);
   }
 
   @override
@@ -99,7 +112,9 @@ class _MapScreenState extends State<MapScreen> {
               });
 
               // 지도에 경로 그리기 (RoutePainter가 구현되어 있다고 가정)
-              RoutePainter.drawRoute(_mapController!, _currentRoute);
+              if (_mapController != null) {
+                RoutePainter.drawRoute(_mapController!, _currentRoute);
+              }
             });
       } else {
         _currentRoute.stop();
@@ -141,8 +156,24 @@ class _MapScreenState extends State<MapScreen> {
           NaverMap(
             options: _mapOptions,
             onMapReady: _onMapReady,
+            // 💡 [API 예제 적용] 지도 탭 이벤트
             onMapTapped: (point, latLng) {
               debugPrint('[MapScreen] 지도 탭: $latLng');
+              ScaffoldMessenger.of(context).hideCurrentSnackBar();
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    "지도 탭: ${latLng.latitude.toStringAsFixed(5)}, ${latLng.longitude.toStringAsFixed(5)}",
+                  ),
+                  duration: const Duration(milliseconds: 500),
+                ),
+              );
+            },
+            // 💡 [API 예제 적용] 심볼(건물, 장소) 탭 이벤트
+            onSymbolTapped: (symbol) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text("장소 선택: ${symbol.caption}")),
+              );
             },
           ),
 

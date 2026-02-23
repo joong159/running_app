@@ -9,12 +9,13 @@
         android:label="가온길"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
-        android:hardwareAccelerated="true">
+        android:hardwareAccelerated="true"
+        android:extractNativeLibs="true">
         <meta-data
             android:name="io.flutter.embedding.android.EnableImpeller"
             android:value="false" />
         <meta-data
-            android:name="com.naver.maps.map.CLIENT_ID"
+            android:name="com.naver.maps.map.NCP_KEY_ID"
             android:value="e4er7uvr2b" />
 
         <activity
