@@ -1,0 +1,9 @@
+name: Local Config
+version: 1.0.0
+models:
+  - name: gemini-1.5-pro
+    model: gemini-1.5-pro-latest
+    api_key: "AIzaSyD5mSM0WYCktuavYHyb6NDY5K4RxHl4zbY"
+  - name: gemini-1.5-flash
+    model: gemini-1.5-flash-latest
+    api_key: "AIzaSyD5mSM0WYCktuavYHyb6NDY5K4RxHl4zbY"

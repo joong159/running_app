@@ -19,14 +19,11 @@ void main() async {
 /// 네이버 지도 SDK 초기화
 Future<void> _initNaverMapSdk() async {
   try {
-    await NaverMapSdk.instance.initialize(
-      clientId: 'e4er7uvr2b', // 네이버 클라우드 플랫폼 Client ID
-      onAuthFailed: (error) {
-        debugPrint('[NaverMap] ❌ 인증 실패 (401): $error');
-        // ✅ 안내 문구를 새로운 패키지명인 com.gaongil로 수정했습니다.
-        debugPrint('[NaverMap] Client ID 또는 앱 패키지명(com.gaongil)을 확인하세요.');
-      },
-    );
+    // 초기화 전에 이 문구가 터미널에 찍히는지 확인용
+    debugPrint('[NaverMap] SDK 초기화 시작...');
+
+    await NaverMapSdk.instance.initialize(clientId: 'e4er7uvr2b');
+
     debugPrint('[NaverMap] ✅ SDK 초기화 성공');
   } catch (e) {
     debugPrint('[NaverMap] ❌ SDK 초기화 중 예외 발생: $e');

@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_naver_map/flutter_naver_map.dart';
+import 'package:geolocator/geolocator.dart';
 
 import '../models/jog_route.dart';
 import '../services/route_painter.dart';
@@ -27,6 +29,9 @@ class _MapScreenState extends State<MapScreen> {
 
   // 조깅 중 여부
   bool _isRunning = false;
+
+  // 위치 스트림 구독 (조깅 중일 때만 활성화)
+  StreamSubscription<Position>? _positionStreamSubscription;
 
   // 서울 시청 초기 좌표
   static const NLatLng _seoulCityHall = NLatLng(37.5666, 126.9784);
@@ -62,6 +67,12 @@ class _MapScreenState extends State<MapScreen> {
     controller.setLocationTrackingMode(NLocationTrackingMode.follow);
   }
 
+  @override
+  void dispose() {
+    _positionStreamSubscription?.cancel();
+    super.dispose();
+  }
+
   // ─────────────────────────────────────
   // 조깅 시작/종료 토글
   // ─────────────────────────────────────
@@ -72,10 +83,28 @@ class _MapScreenState extends State<MapScreen> {
       if (_isRunning) {
         _currentRoute.start();
         debugPrint('[MapScreen] 🏃 조깅 시작');
-        // TODO: GPS 좌표 수신 시작 → _currentRoute.addPoint(latLng) 호출
-        // TODO: RoutePainter.drawRoute(_mapController!, _currentRoute) 로 경로 그리기
+
+        // 위치 스트림 시작
+        _positionStreamSubscription =
+            Geolocator.getPositionStream(
+              locationSettings: const LocationSettings(
+                accuracy: LocationAccuracy.high,
+                distanceFilter: 5, // 5미터 이동 시마다 갱신
+              ),
+            ).listen((Position position) {
+              final latLng = NLatLng(position.latitude, position.longitude);
+
+              setState(() {
+                _currentRoute.addPoint(latLng);
+              });
+
+              // 지도에 경로 그리기 (RoutePainter가 구현되어 있다고 가정)
+              RoutePainter.drawRoute(_mapController!, _currentRoute);
+            });
       } else {
         _currentRoute.stop();
+        _positionStreamSubscription?.cancel();
+        _positionStreamSubscription = null;
         debugPrint(
           '[MapScreen] 🛑 조깅 종료. 총 거리: ${_currentRoute.totalDistanceKm.toStringAsFixed(2)} km',
         );

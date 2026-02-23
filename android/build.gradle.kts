@@ -1,17 +1,7 @@
-// Project-level build.gradle.kts
+// 1. 기존에 있던 allprojects { repositories { ... } } 블록을 완전히 삭제했습니다.
+// 이 설정은 이미 settings.gradle.kts에 들어가 있어서 여기서 중복되면 에러가 납니다.
 
-allprojects {
-    repositories {
-        google()
-        mavenCentral()
-        // 네이버 지도 저장소 (최신 주소 및 Kotlin DSL 문법)
-        maven {
-            url = uri("https://naver.jfrog.io/artifactory/maven/")
-        }
-    }
-}
-
-// 빌드 디렉토리 설정 (기존에 작성하신 로직 유지)
+// 빌드 디렉토리 설정 (현중님의 기존 로직 유지)
 val newBuildDir: Directory = rootProject.layout.buildDirectory
     .dir("../../build")
     .get()
@@ -21,7 +11,7 @@ subprojects {
     val newSubprojectBuildDir: Directory = newBuildDir.dir(project.name)
     project.layout.buildDirectory.value(newSubprojectBuildDir)
     
-    // 추가: 모든 서브프로젝트에 대해 평가 의존성 설정
+    // 서브프로젝트 평가 의존성 유지
     evaluationDependsOn(":app")
 }
 

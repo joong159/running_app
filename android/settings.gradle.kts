@@ -23,4 +23,14 @@ plugins {
     id("org.jetbrains.kotlin.android") version "2.2.20" apply false
 }
 
+// 401 에러 방지 및 네이버 SDK를 가져오기 위한 핵심 설정입니다.
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.PREFER_PROJECT) // ✅ 이렇게 변경
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+
 include(":app")
