@@ -42,3 +42,8 @@ android {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // 네이버 지도 SDK 버전을 3.23.1(NCP_KEY_ID 지원 버전)로 강제 지정
+    implementation("com.naver.maps:map-sdk:3.23.1")
+}

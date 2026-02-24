@@ -21,7 +21,6 @@ Future<void> _initNaverMapSdk() async {
     debugPrint('[NaverMap] SDK 초기화 시작...');
 
     await NaverMapSdk.instance.initialize(
-      clientId: 'e4er7uvr2b',
       onAuthFailed: (ex) {
         // 예제 코드의 상세 에러 처리 로직 적용
         if (ex is NQuotaExceededException) {

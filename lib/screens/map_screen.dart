@@ -25,7 +25,7 @@ class _MapScreenState extends State<MapScreen> {
   NaverMapController? _mapController;
 
   // 조깅 경로 모델 (Polyline 확장 포인트)
-  final JogRoute _currentRoute = JogRoute();
+  JogRoute _currentRoute = JogRoute();
 
   // 조깅 중 여부
   bool _isRunning = false;
@@ -35,6 +35,17 @@ class _MapScreenState extends State<MapScreen> {
 
   // 서울 시청 초기 좌표
   static const NLatLng _seoulCityHall = NLatLng(37.5666, 126.9784);
+
+  @override
+  void initState() {
+    super.initState();
+    _requestLocationPermission();
+  }
+
+  Future<void> _requestLocationPermission() async {
+    // 위치 권한 요청 (거부되어 있을 경우 요청 팝업 표시)
+    await Geolocator.requestPermission();
+  }
 
   // ─────────────────────────────────────
   // 지도 초기 옵션 설정
@@ -94,6 +105,7 @@ class _MapScreenState extends State<MapScreen> {
       _isRunning = !_isRunning;
 
       if (_isRunning) {
+        _currentRoute = JogRoute(); // 새로운 조깅 시작 시 경로 초기화
         _currentRoute.start();
         debugPrint('[MapScreen] 🏃 조깅 시작');
 
