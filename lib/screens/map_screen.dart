@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_naver_map/flutter_naver_map.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../models/jog_route.dart';
 import '../services/route_painter.dart';
@@ -29,6 +30,15 @@ class _MapScreenState extends State<MapScreen> {
 
   // 조깅 중 여부
   bool _isRunning = false;
+  bool _isPaused = false;
+
+  // 1. 데이터 변수 선언 (실시간 계산용)
+  double _totalDistance = 0.0; // meters
+  int _calories = 0; // kcal
+  String _pace = "0'00''"; // min/km
+  final Stopwatch _stopwatch = Stopwatch();
+  Duration _elapsed = Duration.zero;
+  Timer? _timer;
 
   // 위치 스트림 구독 (조깅 중일 때만 활성화)
   StreamSubscription<Position>? _positionStreamSubscription;
@@ -43,8 +53,20 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   Future<void> _requestLocationPermission() async {
-    // 위치 권한 요청 (거부되어 있을 경우 요청 팝업 표시)
-    await Geolocator.requestPermission();
+    // 1. permission_handler를 사용한 권한 체크 로직
+    var status = await Permission.locationWhenInUse.status;
+
+    if (!status.isGranted) {
+      status = await Permission.locationWhenInUse.request();
+    }
+
+    if (status.isDenied || status.isPermanentlyDenied) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('위치 권한이 필요합니다.')));
+      }
+    }
   }
 
   // ─────────────────────────────────────
@@ -74,75 +96,142 @@ class _MapScreenState extends State<MapScreen> {
     _mapController = controller;
     debugPrint('[MapScreen] ✅ 지도 준비 완료');
 
-    // 내 위치 레이어(Blue Dot) 활성화
+    // 1. 현재 위치 표시: 내 위치 추적 모드 활성화 (지도가 나를 따라다님)
     controller.setLocationTrackingMode(NLocationTrackingMode.follow);
 
-    // 💡 [API 예제] 마커 생성 및 클릭 리스너 추가
+    // 3. 추천 마커 찍기: 대진대학교 운동장 주변 (예시 좌표)
+    _addRecommendedMarker(controller);
+  }
+
+  /// 추천 러닝 포인트 마커 추가
+  void _addRecommendedMarker(NaverMapController controller) {
     final marker = NMarker(
-      id: 'example_marker',
-      position: const NLatLng(37.5670135, 126.9783740),
-      caption: const NOverlayCaption(text: "클릭해보세요"),
+      id: 'daejin_uni_track',
+      position: const NLatLng(37.8747, 127.1552), // 대진대학교 좌표
+      caption: const NOverlayCaption(text: "추천: 대진대 운동장"),
+      iconTintColor: Colors.blueAccent, // 마커 색상 강조
     );
-    marker.setOnTapListener((overlay) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text("마커 클릭됨")));
-    });
+
     controller.addOverlay(marker);
   }
 
   @override
   void dispose() {
     _positionStreamSubscription?.cancel();
+    _timer?.cancel();
     super.dispose();
   }
 
   // ─────────────────────────────────────
-  // 조깅 시작/종료 토글
+  // 운동 제어 (Start / Pause / Resume / Stop)
   // ─────────────────────────────────────
-  void _toggleRunning() {
+  void _startExercise() {
     setState(() {
-      _isRunning = !_isRunning;
+      _isRunning = true;
+      _isPaused = false;
 
-      if (_isRunning) {
-        // 이전 경로가 있다면 지도에서 제거
-        if (_mapController != null) {
-          RoutePainter.clearRoute(_mapController!);
-        }
-        _currentRoute = JogRoute(); // 새로운 조깅 시작 시 경로 초기화
-        _currentRoute.start();
-        debugPrint('[MapScreen] 🏃 조깅 시작');
-
-        // 위치 스트림 시작
-        _positionStreamSubscription =
-            Geolocator.getPositionStream(
-              locationSettings: const LocationSettings(
-                accuracy: LocationAccuracy.high,
-                distanceFilter: 5, // 5미터 이동 시마다 갱신
-              ),
-            ).listen((Position position) {
-              final latLng = NLatLng(position.latitude, position.longitude);
-
-              setState(() {
-                _currentRoute.addPoint(latLng);
-              });
-
-              // 지도에 경로 그리기 (RoutePainter가 구현되어 있다고 가정)
-              if (_mapController != null) {
-                RoutePainter.drawRoute(_mapController!, _currentRoute);
-              }
-            });
-      } else {
-        _currentRoute.stop();
-        _positionStreamSubscription?.cancel();
-        _positionStreamSubscription = null;
-        debugPrint(
-          '[MapScreen] 🛑 조깅 종료. 총 거리: ${_currentRoute.totalDistanceKm.toStringAsFixed(2)} km',
-        );
-        // TODO: 경로 저장 로직 추가
-        _showSummaryDialog();
+      // 이전 경로 제거
+      if (_mapController != null) {
+        RoutePainter.clearRoute(_mapController!);
       }
+      _currentRoute = JogRoute();
+      _currentRoute.start();
+
+      // 변수 초기화
+      _totalDistance = 0.0;
+      _calories = 0;
+      _pace = "0'00''";
+      _elapsed = Duration.zero;
+      _stopwatch.reset();
+      _stopwatch.start();
+
+      // 타이머 시작
+      _timer = Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => _updateTimer(),
+      );
+
+      debugPrint('[MapScreen] 🏃 조깅 시작');
+
+      // 위치 스트림 시작
+      _positionStreamSubscription =
+          Geolocator.getPositionStream(
+            locationSettings: const LocationSettings(
+              accuracy: LocationAccuracy.high,
+              distanceFilter: 5,
+            ),
+          ).listen((Position position) {
+            final latLng = NLatLng(position.latitude, position.longitude);
+
+            // 실시간 계산
+            if (_currentRoute.points.isNotEmpty) {
+              final lastPoint = _currentRoute.points.last;
+              final dist = Geolocator.distanceBetween(
+                lastPoint.latitude,
+                lastPoint.longitude,
+                position.latitude,
+                position.longitude,
+              );
+              _totalDistance += dist;
+
+              final distKm = _totalDistance / 1000;
+              _calories = (distKm * 70).toInt();
+              _updatePace(distKm);
+            }
+
+            setState(() {
+              _currentRoute.addPoint(latLng);
+            });
+
+            if (_mapController != null) {
+              RoutePainter.drawRoute(_mapController!, _currentRoute);
+            }
+          });
     });
+  }
+
+  void _pauseExercise() {
+    setState(() {
+      _isPaused = true;
+      _stopwatch.stop();
+      _positionStreamSubscription?.pause();
+    });
+  }
+
+  void _resumeExercise() {
+    setState(() {
+      _isPaused = false;
+      _stopwatch.start();
+      _positionStreamSubscription?.resume();
+    });
+  }
+
+  void _stopExercise() {
+    setState(() {
+      _stopwatch.stop();
+      _timer?.cancel();
+      _positionStreamSubscription?.cancel();
+      _positionStreamSubscription = null;
+      _currentRoute.stop();
+    });
+    _showSummaryDialog();
+  }
+
+  void _updateTimer() {
+    if (_isRunning && !_isPaused) {
+      setState(() {
+        _elapsed = _stopwatch.elapsed;
+      });
+    }
+  }
+
+  void _updatePace(double distKm) {
+    if (distKm > 0 && _elapsed.inSeconds > 0) {
+      final secondsPerKm = _elapsed.inSeconds / distKm;
+      final pMin = secondsPerKm ~/ 60;
+      final pSec = (secondsPerKm % 60).toInt();
+      _pace = "$pMin'${pSec.toString().padLeft(2, '0')}''";
+    }
   }
 
   // ─────────────────────────────────────
@@ -160,25 +249,49 @@ class _MapScreenState extends State<MapScreen> {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('🏃 조깅 완료'),
+        title: const Text('🏃 오늘의 러닝 요약'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              '총 거리: ${_currentRoute.totalDistanceKm.toStringAsFixed(2)} km',
-            ),
-            Text('소요 시간: ${_currentRoute.elapsedTimeFormatted}'),
+            Text('총 주행 거리: ${(_totalDistance / 1000).toStringAsFixed(2)} km'),
+            Text('소모 칼로리: $_calories kcal'),
+            Text('평균 페이스: $_pace'),
+            Text('총 운동 시간: ${_formatDuration(_elapsed)}'),
           ],
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('확인'),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _reset();
+            },
+            child: const Text('기록 저장 및 닫기'),
           ),
         ],
       ),
     );
+  }
+
+  void _reset() {
+    setState(() {
+      _isRunning = false;
+      _isPaused = false;
+      _totalDistance = 0.0;
+      _calories = 0;
+      _pace = "0'00''";
+      _elapsed = Duration.zero;
+      _stopwatch.reset();
+      if (_mapController != null) {
+        RoutePainter.clearRoute(_mapController!);
+      }
+    });
+  }
+
+  String _formatDuration(Duration d) {
+    final minutes = d.inMinutes.toString().padLeft(2, '0');
+    final seconds = (d.inSeconds % 60).toString().padLeft(2, '0');
+    return '$minutes:$seconds';
   }
 
   @override
@@ -198,115 +311,61 @@ class _MapScreenState extends State<MapScreen> {
       body: Stack(
         children: [
           // ── 네이버 지도 ──
-          NaverMap(
-            options: _mapOptions,
-            onMapReady: _onMapReady,
-            // 💡 [API 예제 적용] 지도 탭 이벤트
-            onMapTapped: (point, latLng) {
-              debugPrint('[MapScreen] 지도 탭: $latLng');
-              ScaffoldMessenger.of(context).hideCurrentSnackBar();
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text(
-                    "지도 탭: ${latLng.latitude.toStringAsFixed(5)}, ${latLng.longitude.toStringAsFixed(5)}",
-                  ),
-                  duration: const Duration(milliseconds: 500),
-                ),
-              );
-            },
-            // 💡 [API 예제 적용] 심볼(건물, 장소) 탭 이벤트
-            onSymbolTapped: (symbol) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text("장소 선택: ${symbol.caption}")),
-              );
-            },
-          ),
+          NaverMap(options: _mapOptions, onMapReady: _onMapReady),
 
-          // ── 조깅 정보 오버레이 (조깅 중일 때만 표시) ──
-          if (_isRunning)
-            Positioned(
-              top: 16,
-              left: 16,
-              right: 16,
-              child: _RunningInfoCard(route: _currentRoute),
-            ),
+          // 3. 하단 UI(대시보드) 구현
+          Positioned(bottom: 40, left: 20, right: 20, child: _buildDashboard()),
         ],
       ),
-
-      // ── 조깅 시작/종료 버튼 ──
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _toggleRunning,
-        icon: Icon(_isRunning ? Icons.stop : Icons.play_arrow),
-        label: Text(_isRunning ? '조깅 종료' : '조깅 시작'),
-        backgroundColor: _isRunning ? Colors.red : Colors.green,
-      ),
-      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
     );
   }
-}
 
-// ─────────────────────────────────────────────
-// 조깅 중 정보 표시 카드
-// ─────────────────────────────────────────────
-class _RunningInfoCard extends StatelessWidget {
-  final JogRoute route;
-
-  const _RunningInfoCard({required this.route});
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      elevation: 4,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceAround,
-          children: [
-            _InfoItem(
-              label: '거리',
-              value: '${route.totalDistanceKm.toStringAsFixed(2)} km',
-              icon: Icons.straighten,
-            ),
-            _InfoItem(
-              label: '시간',
-              value: route.elapsedTimeFormatted,
-              icon: Icons.timer,
-            ),
-            _InfoItem(
-              label: '포인트',
-              value: '${route.points.length}',
-              icon: Icons.location_on,
-            ),
-          ],
-        ),
+  // ─────────────────────────────────────
+  // 대시보드 위젯 빌더
+  // ─────────────────────────────────────
+  Widget _buildDashboard() {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.9), // 반투명 하얀색
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 10,
+            spreadRadius: 2,
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          _buildInfoItem("시간", _formatDuration(_elapsed)),
+          _buildInfoItem(
+            "거리",
+            "${(_totalDistance / 1000).toStringAsFixed(2)} km",
+          ),
+          _buildInfoItem("페이스", _pace),
+          _buildInfoItem("칼로리", "$_calories kcal"),
+        ],
       ),
     );
   }
-}
 
-class _InfoItem extends StatelessWidget {
-  final String label;
-  final String value;
-  final IconData icon;
-
-  const _InfoItem({
-    required this.label,
-    required this.value,
-    required this.icon,
-  });
-
-  @override
-  Widget build(BuildContext context) {
+  Widget _buildInfoItem(String label, String value) {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(icon, size: 18, color: Colors.green),
-        const SizedBox(height: 4),
         Text(
           value,
-          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+          style: const TextStyle(
+            fontSize: 18,
+            fontWeight: FontWeight.bold,
+            color: Colors.black87,
+          ),
         ),
-        Text(label, style: const TextStyle(color: Colors.grey, fontSize: 12)),
+        const SizedBox(height: 4),
+        Text(label, style: const TextStyle(fontSize: 12, color: Colors.grey)),
       ],
     );
   }
