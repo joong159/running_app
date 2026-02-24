@@ -105,6 +105,10 @@ class _MapScreenState extends State<MapScreen> {
       _isRunning = !_isRunning;
 
       if (_isRunning) {
+        // 이전 경로가 있다면 지도에서 제거
+        if (_mapController != null) {
+          RoutePainter.clearRoute(_mapController!);
+        }
         _currentRoute = JogRoute(); // 새로운 조깅 시작 시 경로 초기화
         _currentRoute.start();
         debugPrint('[MapScreen] 🏃 조깅 시작');
@@ -136,6 +140,7 @@ class _MapScreenState extends State<MapScreen> {
           '[MapScreen] 🛑 조깅 종료. 총 거리: ${_currentRoute.totalDistanceKm.toStringAsFixed(2)} km',
         );
         // TODO: 경로 저장 로직 추가
+        _showSummaryDialog();
       }
     });
   }
@@ -146,6 +151,34 @@ class _MapScreenState extends State<MapScreen> {
   Future<void> _moveToMyLocation() async {
     if (_mapController == null) return;
     _mapController!.setLocationTrackingMode(NLocationTrackingMode.follow);
+  }
+
+  // ─────────────────────────────────────
+  // 조깅 종료 후 요약 팝업 표시
+  // ─────────────────────────────────────
+  void _showSummaryDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('🏃 조깅 완료'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '총 거리: ${_currentRoute.totalDistanceKm.toStringAsFixed(2)} km',
+            ),
+            Text('소요 시간: ${_currentRoute.elapsedTimeFormatted}'),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('확인'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
