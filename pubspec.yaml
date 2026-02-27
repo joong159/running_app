@@ -38,10 +38,10 @@ dependencies:
   permission_handler: ^12.0.1
   geolocator: ^13.0.0
   flutter_tts: ^3.8.5
-  screenshot: ^2.5.0
+  screenshot: ^3.0.0
   path_provider: ^2.1.3
   shared_preferences: ^2.2.3
-  share_plus: ^9.0.0
+  share_plus: 12.0.1
   firebase_core: ^3.10.1
   firebase_auth: ^5.4.1
   cloud_firestore: ^5.6.1
@@ -72,7 +72,7 @@ flutter:
 
   # To add assets to your application, add an assets section, like this:
   assets:
-    - assets/google_logo.png # 👈 구글 로고 이미지 경로 추가
+    # - assets/google_logo.png # 👈 구글 로고 이미지 경로 추가 (파일이 없으면 주석 처리)
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

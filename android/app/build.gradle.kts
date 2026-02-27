@@ -25,7 +25,7 @@ android {
         applicationId = "com.gaongil"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = 23 // Firebase 및 여러 라이브러리 호환성을 위해 23 이상으로 설정합니다.
+        minSdk = flutter.minSdkVersion // Firebase 및 여러 라이브러리 호환성을 위해 23 이상으로 설정합니다.
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName

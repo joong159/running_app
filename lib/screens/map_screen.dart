@@ -48,6 +48,11 @@ class _MapScreenState extends State<MapScreen> {
   bool _isRunning = false;
   bool _isPaused = false;
 
+  // 서비스 및 데이터 변수
+  final AuthService _authService = AuthService();
+  final FirestoreService _firestoreService = FirestoreService();
+  Uint8List? _lastRunMapSnapshot;
+
   // 1. 데이터 변수 선언 (실시간 계산용)
   double _totalDistance = 0.0; // meters
   int _calories = 0; // kcal
@@ -293,9 +298,12 @@ class _MapScreenState extends State<MapScreen> {
     await _speak("운동을 종료합니다. 오늘 총 ${totalKm}km를 달렸습니다. 수고하셨습니다.", force: true);
 
     // 지도 스냅샷 캡처
-    _lastRunMapSnapshot = await _mapController?.takeSnapshot(
+    final snapshotFile = await _mapController?.takeSnapshot(
       showControls: false,
     );
+    if (snapshotFile != null) {
+      _lastRunMapSnapshot = await snapshotFile.readAsBytes();
+    }
 
     setState(() {
       _isRunning = false;
