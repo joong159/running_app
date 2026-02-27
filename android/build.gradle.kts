@@ -1,3 +1,8 @@
+plugins {
+    // Add the dependency for the Google services Gradle plugin
+    id("com.google.gms.google-services") version "4.4.4" apply false
+}
+
 // 1. 기존에 있던 allprojects { repositories { ... } } 블록을 완전히 삭제했습니다.
 // 이 설정은 이미 settings.gradle.kts에 들어가 있어서 여기서 중복되면 에러가 납니다.
 

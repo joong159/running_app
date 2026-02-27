@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "823619975857",
+    "project_id": "gaongil-74801",
+    "storage_bucket": "gaongil-74801.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:823619975857:android:d357c1cf77f953b756c090",
+        "android_client_info": {
+          "package_name": "com.gaongil"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyArZF-owqBzg78joLp2cTAXTvhSWUBdbfw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

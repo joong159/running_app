@@ -1,15 +1,22 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_naver_map/flutter_naver_map.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
+import 'firebase_options.dart';
 import 'screens/map_screen.dart';
+import 'screens/login_screen.dart';
 import 'services/location_service.dart';
+import 'services/auth_service.dart';
 
 // ─────────────────────────────────────────────
 // 앱 진입점
 // ─────────────────────────────────────────────
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Firebase 초기화
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
   runApp(const RunningApp());
 }
@@ -72,6 +79,8 @@ class _AppEntryPointState extends State<AppEntryPoint> {
   bool _permissionGranted = false;
   bool _isLoading = true;
 
+  final AuthService _authService = AuthService();
+
   @override
   void initState() {
     super.initState();
@@ -79,7 +88,7 @@ class _AppEntryPointState extends State<AppEntryPoint> {
   }
 
   Future<void> _initializeApp() async {
-    // 1. 네이버 지도 SDK 초기화 (UI가 뜬 상태에서 진행)
+    // 1. 네이버 지도 SDK 초기화
     await _initNaverMapSdk();
 
     // 2. 위치 권한 요청
@@ -98,16 +107,34 @@ class _AppEntryPointState extends State<AppEntryPoint> {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
-    if (!_permissionGranted) {
-      return _PermissionDeniedScreen(
-        onRetry: () {
-          setState(() => _isLoading = true);
-          _initializeApp();
-        },
-      );
-    }
+    // 3. 인증 상태에 따라 화면 분기
+    return StreamBuilder<User?>(
+      stream: _authService.userStream,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
 
-    return const MapScreen();
+        // 4. 위치 권한 확인
+        if (!_permissionGranted) {
+          return _PermissionDeniedScreen(
+            onRetry: () {
+              setState(() => _isLoading = true);
+              _initializeApp();
+            },
+          );
+        }
+
+        // 5. 로그인 여부에 따라 화면 결정
+        if (snapshot.hasData) {
+          return const MapScreen(); // 로그인 되어 있으면 MapScreen으로
+        } else {
+          return const LoginScreen(); // 로그인 안되어 있으면 LoginScreen으로
+        }
+      },
+    );
   }
 }
 
