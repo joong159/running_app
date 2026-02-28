@@ -803,13 +803,15 @@ class _MapScreenState extends State<MapScreen> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          _buildInfoItem("시간", _formatDuration(_elapsed)),
-          _buildInfoItem(
-            "거리",
-            "${(_totalDistance / 1000).toStringAsFixed(2)} km",
+          Expanded(child: _buildInfoItem("시간", _formatDuration(_elapsed))),
+          Expanded(
+            child: _buildInfoItem(
+              "거리",
+              "${(_totalDistance / 1000).toStringAsFixed(2)} km",
+            ),
           ),
-          _buildInfoItem("페이스", _pace),
-          _buildInfoItem("칼로리", "$_calories kcal"),
+          Expanded(child: _buildInfoItem("페이스", _pace)),
+          Expanded(child: _buildInfoItem("칼로리", "$_calories kcal")),
         ],
       ),
     );
@@ -868,12 +870,15 @@ class _MapScreenState extends State<MapScreen> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          value,
-          style: const TextStyle(
-            fontSize: 18,
-            fontWeight: FontWeight.bold,
-            color: Colors.black87,
+        FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            value,
+            style: const TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+              color: Colors.black87,
+            ),
           ),
         ),
         const SizedBox(height: 4),
