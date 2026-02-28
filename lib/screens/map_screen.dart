@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_naver_map/flutter_naver_map.dart';
@@ -19,6 +18,7 @@ import '../services/run_history_service.dart';
 import '../services/route_painter.dart';
 import 'history_screen.dart';
 import 'community_screen.dart';
+import '../models/course.dart'; // Course 모델 import
 
 // ─────────────────────────────────────────────
 // MapScreen
@@ -44,6 +44,9 @@ class _MapScreenState extends State<MapScreen> {
   // 조깅 경로 모델 (Polyline 확장 포인트)
   JogRoute _currentRoute = JogRoute();
 
+  // 📍 선택된 코스 경로 오버레이 (미리보기용)
+  NPathOverlay? _selectedCourseOverlay;
+
   // 조깅 중 여부
   bool _isRunning = false;
   bool _isPaused = false;
@@ -60,25 +63,14 @@ class _MapScreenState extends State<MapScreen> {
   final Stopwatch _stopwatch = Stopwatch();
   Duration _elapsed = Duration.zero;
   Timer? _timer;
+  List<double> _kmSplits = []; // 📍 구간별 페이스 저장용 리스트
+  Duration _lastSplitTime = Duration.zero; // 마지막 구간 측정 시간
 
   // 2. TTS 변수 선언
   late FlutterTts _flutterTts;
   int _lastKmAnnounced = 0;
   int _lastMinuteAnnounced = 0;
   DateTime? _lastSpeakTime; // 음성 안내 쿨타임 제어용
-
-  // 3. 고급 내비게이션 변수 선언
-  // 예시 추천 경로 (대진대학교 주변)
-  static final List<NLatLng> _recommendedRoutePoints = [
-    const NLatLng(37.8747, 127.1552), // 대진대 운동장
-    const NLatLng(37.8755, 127.1565),
-    const NLatLng(37.8760, 127.1558),
-    const NLatLng(37.8752, 127.1545),
-    const NLatLng(37.8747, 127.1552),
-  ];
-  int _nextWaypointIndex = 0;
-  bool _isOffRoute = false;
-  bool _isApproachingWaypoint = false;
 
   // 위치 스트림 구독 (조깅 중일 때만 활성화)
   StreamSubscription<Position>? _positionStreamSubscription;
@@ -145,35 +137,160 @@ class _MapScreenState extends State<MapScreen> {
     _mapController = controller;
     debugPrint('[MapScreen] ✅ 지도 준비 완료');
 
-    // 1. 현재 위치 표시: 내 위치 추적 모드 활성화 (지도가 나를 따라다님)
-    controller.setLocationTrackingMode(NLocationTrackingMode.follow);
+    // 1. 내 위치로 카메라 이동 및 추적 모드 설정
+    await _moveToMyLocation();
 
-    // 3. 추천 마커 찍기: 대진대학교 운동장 주변 (예시 좌표)
-    _addRecommendedMarker(controller);
-
-    // 4. 추천 경로 그리기
-    final recommendedPathOverlay = NPathOverlay(
-      id: 'recommended_path',
-      coords: _recommendedRoutePoints,
-      width: 8,
-      color: Colors.blue.withOpacity(0.6),
-      outlineWidth: 2,
-      outlineColor: Colors.blueAccent,
-    );
-    controller.addOverlay(recommendedPathOverlay);
-    debugPrint('[MapScreen] ✅ 추천 경로 표시 완료');
+    // 2. Firestore에서 주변 코스 불러오기 (플랫폼 확장성 핵심!)
+    await _loadNearbyCourses();
   }
 
-  /// 추천 러닝 포인트 마커 추가
-  void _addRecommendedMarker(NaverMapController controller) {
-    final marker = NMarker(
-      id: 'daejin_uni_track',
-      position: const NLatLng(37.8747, 127.1552), // 대진대학교 좌표
-      caption: const NOverlayCaption(text: "추천: 대진대 운동장"),
-      iconTintColor: Colors.blueAccent, // 마커 색상 강조
+  /// 📍 Firestore에서 코스 정보를 가져와 지도에 마커로 표시
+  Future<void> _loadNearbyCourses() async {
+    if (_mapController == null) return;
+
+    try {
+      // 1. Firestore에서 코스 목록 가져오기
+      final courses = await _firestoreService.getCourses();
+      debugPrint('[MapScreen] 📍 불러온 코스 개수: ${courses.length}개');
+
+      for (var course in courses) {
+        // 2. 마커 생성
+        final marker = NMarker(
+          id: course.id,
+          position: course.position,
+          caption: NOverlayCaption(text: course.title),
+          iconTintColor: Colors.indigoAccent, // 추천 코스는 남색으로 표시
+        );
+
+        // 3. 마커 클릭 리스너 (정보창 띄우기)
+        marker.setOnTapListener((overlay) {
+          _showCourseInfoDialog(course);
+          _previewCoursePath(course); // 📍 경로 미리보기 그리기
+        });
+
+        // 4. 지도에 추가
+        _mapController!.addOverlay(marker);
+      }
+    } catch (e) {
+      debugPrint('[MapScreen] ❌ 코스 마커 로딩 실패: $e');
+    }
+  }
+
+  /// 📍 선택한 코스의 경로를 지도에 그리기
+  void _previewCoursePath(Course course) {
+    if (_mapController == null) return;
+
+    // 1. 기존에 그려진 경로가 있다면 제거
+    if (_selectedCourseOverlay != null) {
+      _mapController!.deleteOverlay(_selectedCourseOverlay!.info);
+      _selectedCourseOverlay = null;
+    }
+
+    // 2. 경로 데이터가 없으면 리턴 (혹은 마커 위치에 원 그리기 등 대체 가능)
+    if (course.path.isEmpty) return;
+
+    // 3. 새로운 경로 오버레이 생성
+    _selectedCourseOverlay = NPathOverlay(
+      id: 'course_preview_${course.id}',
+      coords: course.path,
+      width: 10,
+      color: Colors.indigoAccent.withOpacity(0.7), // 미리보기는 약간 투명하게
+      outlineWidth: 2,
+      outlineColor: Colors.white,
     );
 
-    controller.addOverlay(marker);
+    // 4. 지도에 추가
+    _mapController!.addOverlay(_selectedCourseOverlay!);
+
+    // 5. (선택 사항) 경로가 잘 보이도록 카메라 이동
+    // final bounds = NLatLngBounds.from(course.path);
+    // _mapController!.updateCamera(NCameraUpdate.fitBounds(bounds, padding: const EdgeInsets.all(40)));
+  }
+
+  /// 코스 상세 정보 바텀 시트
+  void _showCourseInfoDialog(Course course) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) {
+        return Container(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.flag, color: Colors.indigo, size: 30),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      course.title,
+                      style: const TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Text(
+                course.description,
+                style: const TextStyle(fontSize: 16, color: Colors.black87),
+              ),
+              const SizedBox(height: 24),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: [
+                  _buildCourseStat(
+                    Icons.straighten,
+                    '${course.distanceKm}km',
+                    '총 거리',
+                  ),
+                  _buildCourseStat(Icons.timer, '예상 30분', '소요 시간'), // 예상 시간은 임시
+                ],
+              ),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    // TODO: 해당 코스로 내비게이션 시작 기능 연결
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('${course.title} 코스로 안내를 시작합니다!')),
+                    );
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.indigo,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                  ),
+                  child: const Text('이 코스로 달리기'),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildCourseStat(IconData icon, String value, String label) {
+    return Column(
+      children: [
+        Icon(icon, color: Colors.grey),
+        const SizedBox(height: 4),
+        Text(
+          value,
+          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        ),
+        Text(label, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+      ],
+    );
   }
 
   @override
@@ -192,6 +309,12 @@ class _MapScreenState extends State<MapScreen> {
       _isRunning = true;
       _isPaused = false;
 
+      // 📍 운동 시작 시 미리보기 경로 제거 (깔끔하게)
+      if (_selectedCourseOverlay != null && _mapController != null) {
+        _mapController!.deleteOverlay(_selectedCourseOverlay!.info);
+        _selectedCourseOverlay = null;
+      }
+
       // 이전 경로 제거
       if (_mapController != null) {
         RoutePainter.clearRoute(_mapController!);
@@ -208,9 +331,8 @@ class _MapScreenState extends State<MapScreen> {
       _stopwatch.start();
       _lastKmAnnounced = 0;
       _lastMinuteAnnounced = 0;
-      _nextWaypointIndex = 0;
-      _isOffRoute = false;
-      _isApproachingWaypoint = false;
+      _kmSplits = []; // 초기화
+      _lastSplitTime = Duration.zero; // 초기화
 
       // 운동 시작 음성 안내
       _speak("가온길 러닝을 시작합니다.", force: true);
@@ -232,9 +354,6 @@ class _MapScreenState extends State<MapScreen> {
             ),
           ).listen((Position position) {
             final latLng = NLatLng(position.latitude, position.longitude);
-
-            // 내비게이션 로직 처리 (경로 이탈, 방향 전환)
-            _checkNavigationCues(latLng);
 
             // 실시간 계산
             if (_currentRoute.points.isNotEmpty) {
@@ -258,6 +377,14 @@ class _MapScreenState extends State<MapScreen> {
               // 1km 마다 음성 안내
               final currentKm = (_totalDistance / 1000).floor();
               if (currentKm > 0 && currentKm > _lastKmAnnounced) {
+                // 📍 1km 구간 페이스 계산 및 저장
+                final nowElapsed = _stopwatch.elapsed;
+                final durationSinceLast = nowElapsed - _lastSplitTime;
+                final splitMinutes =
+                    durationSinceLast.inSeconds / 60.0; // 분 단위 변환
+                _kmSplits.add(splitMinutes);
+                _lastSplitTime = nowElapsed;
+
                 _lastKmAnnounced = currentKm;
                 _announceStatus(isKmAnnounce: true);
               }
@@ -378,107 +505,18 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   // ─────────────────────────────────────
-  // 고급 내비게이션 로직
-  // ─────────────────────────────────────
-  void _checkNavigationCues(NLatLng currentLatLng) {
-    if (_recommendedRoutePoints.length < 2) return;
-
-    // 1. 경로 이탈 감지
-    final minDistanceToRoute = _distanceToPolyline(
-      currentLatLng,
-      _recommendedRoutePoints,
-    );
-    if (minDistanceToRoute > 15.0 && !_isOffRoute) {
-      _speak("경로를 벗어났습니다. 원래 경로로 복귀하세요.");
-      setState(() => _isOffRoute = true);
-    } else if (minDistanceToRoute <= 10.0 && _isOffRoute) {
-      setState(() => _isOffRoute = false);
-    }
-
-    // 2. 회전 지점 안내
-    if (_nextWaypointIndex < _recommendedRoutePoints.length) {
-      final nextWaypoint = _recommendedRoutePoints[_nextWaypointIndex];
-      final distanceToWaypoint = Geolocator.distanceBetween(
-        currentLatLng.latitude,
-        currentLatLng.longitude,
-        nextWaypoint.latitude,
-        nextWaypoint.longitude,
-      );
-
-      // 50m 이내 접근 시 안내
-      if (distanceToWaypoint < 50 && !_isApproachingWaypoint) {
-        _speak("잠시 후 방향 전환입니다.");
-        setState(() => _isApproachingWaypoint = true);
-      }
-
-      // 15m 이내 통과 시 다음 웨이포인트로 업데이트
-      if (distanceToWaypoint < 15) {
-        setState(() {
-          _nextWaypointIndex++;
-          _isApproachingWaypoint = false; // 다음 웨이포인트 안내를 위해 초기화
-        });
-      }
-    }
-  }
-
-  /// 한 점에서 폴리라인까지의 최단 거리를 계산합니다 (단위: meters).
-  double _distanceToPolyline(NLatLng point, List<NLatLng> polyline) {
-    double minDistance = double.infinity;
-    for (int i = 0; i < polyline.length - 1; i++) {
-      final segmentStart = polyline[i];
-      final segmentEnd = polyline[i + 1];
-
-      final distanceToSegment = _distanceToSegment(
-        point,
-        segmentStart,
-        segmentEnd,
-      );
-      if (distanceToSegment < minDistance) {
-        minDistance = distanceToSegment;
-      }
-    }
-    return minDistance;
-  }
-
-  /// 한 점에서 선분까지의 최단 거리를 계산합니다.
-  double _distanceToSegment(NLatLng p, NLatLng a, NLatLng b) {
-    final double pa = Geolocator.distanceBetween(
-      p.latitude,
-      p.longitude,
-      a.latitude,
-      a.longitude,
-    );
-    final double pb = Geolocator.distanceBetween(
-      p.latitude,
-      p.longitude,
-      b.latitude,
-      b.longitude,
-    );
-    final double ab = Geolocator.distanceBetween(
-      a.latitude,
-      a.longitude,
-      b.latitude,
-      b.longitude,
-    );
-
-    if (ab == 0) return pa;
-
-    // 점 P가 선분 AB의 'A'쪽 외부에 있는 경우
-    if (pow(pb, 2) > pow(pa, 2) + pow(ab, 2)) return pa;
-    // 점 P가 선분 AB의 'B'쪽 외부에 있는 경우
-    if (pow(pa, 2) > pow(pb, 2) + pow(ab, 2)) return pb;
-
-    // 헤론의 공식을 사용하여 삼각형의 면적을 구하고, 이를 통해 높이(거리)를 계산
-    final double s = (pa + pb + ab) / 2;
-    final double area = sqrt(s * (s - pa) * (s - pb) * (s - ab));
-    return (2 * area) / ab;
-  }
-
-  // ─────────────────────────────────────
   // 카메라를 내 위치로 이동
   // ─────────────────────────────────────
   Future<void> _moveToMyLocation() async {
     if (_mapController == null) return;
+
+    // 현재 위치 가져오기 (Geolocator)
+    final position = await Geolocator.getCurrentPosition();
+    final latLng = NLatLng(position.latitude, position.longitude);
+
+    // 카메라 이동 및 추적 모드 설정
+    final cameraUpdate = NCameraUpdate.withParams(target: latLng, zoom: 15);
+    await _mapController!.updateCamera(cameraUpdate);
     _mapController!.setLocationTrackingMode(NLocationTrackingMode.follow);
   }
 
@@ -591,26 +629,33 @@ class _MapScreenState extends State<MapScreen> {
               Expanded(
                 child: TextButton(
                   onPressed: () async {
-                    // 1. 로컬에 저장
-                    final record = RunRecord(
-                      date: DateTime.now(),
-                      totalDistanceKm: _totalDistance / 1000,
-                      duration: _elapsed,
-                      calories: _calories,
-                      pace: _pace,
-                    );
-                    await RunHistoryService().saveRun(record);
-
-                    // 2. Firebase에 업로드
-                    if (_authService.currentUser != null &&
-                        _lastRunMapSnapshot != null) {
-                      await _firestoreService.uploadRunRecord(
-                        record,
-                        _authService.currentUser!,
-                        _lastRunMapSnapshot!,
+                    try {
+                      // 1. 로컬에 저장
+                      final record = RunRecord(
+                        date: DateTime.now(),
+                        totalDistanceKm: _totalDistance / 1000,
+                        duration: _elapsed,
+                        calories: _calories,
+                        pace: _pace,
+                        paceSegments: _kmSplits, // 📍 저장 시 구간 기록 포함
+                        routePath: _currentRoute.points, // 📍 이동 경로 저장
                       );
+                      await RunHistoryService().saveRun(record);
+
+                      // 2. Firebase에 업로드
+                      if (_authService.currentUser != null &&
+                          _lastRunMapSnapshot != null) {
+                        await _firestoreService.uploadRunRecord(
+                          record,
+                          _authService.currentUser!,
+                          _lastRunMapSnapshot!,
+                        );
+                      }
+                    } catch (e) {
+                      debugPrint('저장/업로드 중 오류 발생 (무시하고 닫기): $e');
                     }
 
+                    if (!context.mounted) return;
                     Navigator.pop(context);
                     _reset();
                     ScaffoldMessenger.of(context).showSnackBar(
@@ -670,9 +715,6 @@ class _MapScreenState extends State<MapScreen> {
       _pace = "0'00''";
       _elapsed = Duration.zero;
       _stopwatch.reset();
-      _nextWaypointIndex = 0;
-      _isOffRoute = false;
-      _isApproachingWaypoint = false;
       if (_mapController != null) {
         RoutePainter.clearRoute(_mapController!);
       }
@@ -740,6 +782,14 @@ class _MapScreenState extends State<MapScreen> {
             left: 20,
             right: 20,
             child: _buildRankingDashboard(),
+          ),
+
+          // 주간 통계 대시보드 (좌측 상단)
+          Positioned(
+            top: 100,
+            left: 20,
+            right: 20,
+            child: _buildWeeklyStatsCard(),
           ),
 
           // 운동 정보 대시보드
@@ -857,6 +907,62 @@ class _MapScreenState extends State<MapScreen> {
                 style: TextStyle(
                   color: Colors.white.withOpacity(0.8),
                   fontSize: 14,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// 주간 통계 카드 (이번 주 vs 지난 주)
+  Widget _buildWeeklyStatsCard() {
+    final user = _authService.currentUser;
+    if (user == null) return const SizedBox.shrink();
+
+    return FutureBuilder<Map<String, double>>(
+      future: _firestoreService.getWeeklyStats(user.uid),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) return const SizedBox.shrink();
+
+        final thisWeek = snapshot.data!['thisWeek']!;
+        final lastWeek = snapshot.data!['lastWeek']!;
+        final diff = thisWeek - lastWeek;
+        final isPositive = diff >= 0;
+
+        return Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.9),
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.1),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.trending_up, color: Colors.green),
+              const SizedBox(width: 8),
+              Text(
+                '이번 주 ${thisWeek.toStringAsFixed(1)}km',
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 14,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                '(${isPositive ? '+' : ''}${diff.toStringAsFixed(1)}km)',
+                style: TextStyle(
+                  color: isPositive ? Colors.red : Colors.blue,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
                 ),
               ),
             ],

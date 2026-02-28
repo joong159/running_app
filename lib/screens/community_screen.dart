@@ -1,6 +1,8 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:running_app/services/firestore_service.dart';
+import 'package:running_app/services/auth_service.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 class CommunityScreen extends StatefulWidget {
   const CommunityScreen({super.key});
@@ -11,42 +13,113 @@ class CommunityScreen extends StatefulWidget {
 
 class _CommunityScreenState extends State<CommunityScreen> {
   final FirestoreService _firestoreService = FirestoreService();
+  final AuthService _authService = AuthService();
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('가온길 커뮤니티')),
-      body: StreamBuilder<QuerySnapshot>(
-        stream: _firestoreService.getCommunityFeed(),
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-            return const Center(child: Text('아직 공유된 기록이 없어요.'));
-          }
-
-          final docs = snapshot.data!.docs;
-
-          return ListView.builder(
-            itemCount: docs.length,
-            itemBuilder: (context, index) {
-              final data = docs[index].data() as Map<String, dynamic>;
-              return _buildFeedCard(data);
-            },
-          );
-        },
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('가온길 커뮤니티'),
+          bottom: const TabBar(
+            tabs: [
+              Tab(text: '피드'),
+              Tab(text: '크루 모집'),
+            ],
+            indicatorColor: Colors.green,
+            labelColor: Colors.green,
+            unselectedLabelColor: Colors.grey,
+          ),
+        ),
+        body: TabBarView(children: [_buildFeedTab(), _buildCrewTab()]),
+        floatingActionButton: FloatingActionButton(
+          onPressed: () {
+            // TODO: 크루 생성 또는 글쓰기 화면 연결
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(const SnackBar(content: Text('크루 생성 기능 준비 중입니다!')));
+          },
+          backgroundColor: Colors.green,
+          child: const Icon(Icons.add, color: Colors.white),
+        ),
       ),
     );
   }
 
-  Widget _buildFeedCard(Map<String, dynamic> data) {
+  // ─────────────────────────────────────
+  // 1. 피드 탭 (러닝 기록 공유)
+  // ─────────────────────────────────────
+  Widget _buildFeedTab() {
+    return StreamBuilder<QuerySnapshot>(
+      stream: _firestoreService.getCommunityFeed(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+          return const Center(child: Text('아직 공유된 기록이 없어요.'));
+        }
+
+        final docs = snapshot.data!.docs;
+
+        return ListView.builder(
+          itemCount: docs.length,
+          itemBuilder: (context, index) {
+            final doc = docs[index];
+            final data = doc.data() as Map<String, dynamic>;
+            return _buildFeedCard(doc.id, data);
+          },
+        );
+      },
+    );
+  }
+
+  // ─────────────────────────────────────
+  // 2. 크루 탭 (모집 게시판)
+  // ─────────────────────────────────────
+  Widget _buildCrewTab() {
+    return StreamBuilder<QuerySnapshot>(
+      stream: _firestoreService.getCrews(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+          return const Center(child: Text('모집 중인 크루가 없습니다.'));
+        }
+
+        final docs = snapshot.data!.docs;
+
+        return ListView.builder(
+          itemCount: docs.length,
+          itemBuilder: (context, index) {
+            final data = docs[index].data() as Map<String, dynamic>;
+            return ListTile(
+              leading: const CircleAvatar(child: Icon(Icons.group)),
+              title: Text(data['name'] ?? '이름 없음'),
+              subtitle: Text(data['description'] ?? ''),
+              trailing: Text(
+                '${data['currentMembers']}/${data['maxMembers']}명',
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildFeedCard(String docId, Map<String, dynamic> data) {
     final distance = (data['distanceKm'] as num).toStringAsFixed(2);
     final pace = data['pace'] as String;
     final userName = data['userName'] as String;
     final ageGroup = data['userAgeGroup'] as int;
     final gender = data['userGender'] as String;
     final imageUrl = data['mapImageUrl'] as String;
+    final likes = data['likes'] as int? ?? 0;
+    final likedBy = List<String>.from(data['likedBy'] ?? []);
+    final currentUser = _authService.currentUser;
+    final isLiked = currentUser != null && likedBy.contains(currentUser.uid);
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -111,10 +184,17 @@ class _CommunityScreenState extends State<CommunityScreen> {
                 Row(
                   children: [
                     IconButton(
-                      onPressed: () {},
-                      icon: const Icon(Icons.favorite_border),
+                      onPressed: () {
+                        if (currentUser != null) {
+                          _firestoreService.toggleLike(docId, currentUser.uid);
+                        }
+                      },
+                      icon: Icon(
+                        isLiked ? Icons.favorite : Icons.favorite_border,
+                        color: isLiked ? Colors.red : Colors.grey,
+                      ),
                     ),
-                    Text((data['likes'] as int? ?? 0).toString()),
+                    Text(likes.toString()),
                   ],
                 ),
               ],

@@ -12,7 +12,20 @@
           "package_name": "com.gaongil"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "823619975857-fp6tmse7t5bf30tfu40ko8sbqqjll9uu.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.gaongil",
+            "certificate_hash": "99019ff1d8c6ded6f7720add9cd8ca5915ee99ec"
+          }
+        },
+        {
+          "client_id": "823619975857-q1ps0n595fblmep64tpil66qpaacgnl3.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyArZF-owqBzg78joLp2cTAXTvhSWUBdbfw"
@@ -20,7 +33,12 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "823619975857-q1ps0n595fblmep64tpil66qpaacgnl3.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     }

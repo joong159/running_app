@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../models/run_record.dart';
-import '../services/run_history_service.dart';
+import '../services/firestore_service.dart';
+import '../services/auth_service.dart';
+import 'run_detail_screen.dart'; // 상세 화면 import
 
 class HistoryScreen extends StatefulWidget {
   const HistoryScreen({super.key});
@@ -10,12 +12,19 @@ class HistoryScreen extends StatefulWidget {
 }
 
 class _HistoryScreenState extends State<HistoryScreen> {
+  final AuthService _authService = AuthService();
+  final FirestoreService _firestoreService = FirestoreService();
   late Future<List<RunRecord>> _historyFuture;
 
   @override
   void initState() {
     super.initState();
-    _historyFuture = RunHistoryService().getRunHistory();
+    final user = _authService.currentUser;
+    if (user != null) {
+      _historyFuture = _firestoreService.getUserRuns(user.uid);
+    } else {
+      _historyFuture = Future.value([]);
+    }
   }
 
   /// 날짜별로 기록을 그룹화하는 함수
@@ -45,7 +54,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
           } else if (snapshot.hasError) {
             return Center(child: Text('오류 발생: ${snapshot.error}'));
           } else if (!snapshot.hasData || snapshot.data!.isEmpty) {
-            return const Center(child: Text('저장된 운동 기록이 없습니다.'));
+            return const Center(child: Text('아직 러닝 기록이 없습니다.\n지금 바로 달려보세요!'));
           }
 
           final records = snapshot.data!;
@@ -107,6 +116,14 @@ class _HistoryScreenState extends State<HistoryScreen> {
         record.pace,
         style: const TextStyle(fontWeight: FontWeight.bold),
       ),
+      onTap: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => RunDetailScreen(record: record),
+          ),
+        );
+      },
     );
   }
 
