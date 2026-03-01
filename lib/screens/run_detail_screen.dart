@@ -156,7 +156,7 @@ class RunDetailScreen extends StatelessWidget {
                               scrollGesturesEnable: false,
                               zoomGesturesEnable: false,
                               tiltGesturesEnable: false,
-                              rotateGesturesEnable: false,
+                              rotationGesturesEnable: false,
                               scaleBarEnable: false,
                               logoClickEnable: false,
                             ),
