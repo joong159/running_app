@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:fl_chart/fl_chart.dart';
@@ -12,26 +13,71 @@ import '../models/run_record.dart';
 import '../services/firestore_service.dart';
 import '../services/auth_service.dart';
 
-class RunDetailScreen extends StatelessWidget {
+class RunDetailScreen extends StatefulWidget {
   final RunRecord record;
+
+  const RunDetailScreen({super.key, required this.record});
+
+  @override
+  State<RunDetailScreen> createState() => _RunDetailScreenState();
+}
+
+class _RunDetailScreenState extends State<RunDetailScreen> {
   final ScreenshotController _screenshotController = ScreenshotController();
   final FirestoreService _firestoreService = FirestoreService();
   final AuthService _authService = AuthService();
+  NaverMapController? _mapController; // 📍 지도 컨트롤러 추가
+  List<FlSpot> _elevationSpots = []; // 📍 고도 데이터 포인트
 
-  RunDetailScreen({super.key, required this.record});
+  @override
+  void initState() {
+    super.initState();
+    _generateMockElevationData(); // 고도 데이터 생성 (데모용)
+  }
 
   Future<void> _shareRecord(BuildContext context) async {
-    final capturedImage = await _screenshotController.capture();
-    if (capturedImage == null) return;
+    // 1. 지도 스냅샷 캡처
+    if (_mapController == null) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const Center(child: CircularProgressIndicator()),
+    );
 
     try {
-      final tempDir = await getTemporaryDirectory();
-      final file = await File('${tempDir.path}/run_record.png').create();
-      await file.writeAsBytes(capturedImage);
+      final snapshotFile = await _mapController!.takeSnapshot(
+        showControls: false,
+      );
+      final mapImage = await snapshotFile.readAsBytes();
 
-      await Share.shareXFiles([XFile(file.path)], text: '나의 러닝 기록 🏃‍♂️');
+      // 2. 공유 카드 위젯 생성
+      final shareCard = _ShareCard(
+        mapImage: mapImage,
+        distance: widget.record.totalDistanceKm.toStringAsFixed(2),
+        time: _formatDuration(widget.record.duration),
+        pace: widget.record.pace,
+        calories: widget.record.calories,
+        date: widget.record.date,
+      );
+
+      // 3. 위젯을 이미지로 캡처
+      final imageBytes = await _screenshotController.captureFromWidget(
+        Material(child: shareCard),
+        pixelRatio: 2.0,
+        targetSize: const Size(540, 960),
+      );
+
+      final tempDir = await getTemporaryDirectory();
+      final file = await File('${tempDir.path}/run_record_share.png').create();
+      await file.writeAsBytes(imageBytes);
+
+      if (mounted) Navigator.pop(context); // 로딩 닫기
+
+      await Share.shareXFiles([XFile(file.path)], text: '나의 러닝 기록 🏃‍♂️ #가온길');
     } catch (e) {
       if (context.mounted) {
+        Navigator.pop(context); // 로딩 닫기
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('공유 실패: $e')));
@@ -40,7 +86,7 @@ class RunDetailScreen extends StatelessWidget {
   }
 
   Future<void> _deleteRecord(BuildContext context) async {
-    if (record.id == null) {
+    if (widget.record.id == null) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('삭제할 수 없는 기록입니다.')));
@@ -68,7 +114,11 @@ class RunDetailScreen extends StatelessWidget {
     if (confirm == true) {
       final user = _authService.currentUser;
       if (user != null) {
-        await _firestoreService.deleteRun(record.id!, user.uid, record);
+        await _firestoreService.deleteRun(
+          widget.record.id!,
+          user.uid,
+          widget.record,
+        );
         if (context.mounted) {
           Navigator.pop(context); // 상세 화면 닫기
           ScaffoldMessenger.of(
@@ -79,16 +129,108 @@ class RunDetailScreen extends StatelessWidget {
     }
   }
 
+  Future<void> _sharePaceTable(BuildContext context) async {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const Center(child: CircularProgressIndicator()),
+    );
+
+    try {
+      // 캡처할 위젯 생성 (흰색 배경의 깔끔한 스타일)
+      final tableWidget = Container(
+        color: Colors.white,
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            const Text(
+              '구간별 페이스 기록',
+              style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: Colors.black,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '${widget.record.date.year}년 ${widget.record.date.month}월 ${widget.record.date.day}일',
+              style: const TextStyle(fontSize: 14, color: Colors.grey),
+            ),
+            const SizedBox(height: 24),
+            // 기존 테이블 위젯 재사용 (너비 꽉 차게)
+            SizedBox(width: double.infinity, child: _buildPaceTable()),
+            const SizedBox(height: 24),
+            const Text(
+              'GAONGIL RUNNING',
+              style: TextStyle(
+                color: Colors.green,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1.2,
+              ),
+            ),
+          ],
+        ),
+      );
+
+      final imageBytes = await _screenshotController.captureFromWidget(
+        Material(child: tableWidget),
+        delay: const Duration(milliseconds: 100),
+        pixelRatio: 2.0,
+      );
+
+      final tempDir = await getTemporaryDirectory();
+      final file = await File('${tempDir.path}/pace_table.png').create();
+      await file.writeAsBytes(imageBytes);
+
+      if (mounted) Navigator.pop(context); // 로딩 닫기
+
+      await Share.shareXFiles([
+        XFile(file.path),
+      ], text: '나의 구간별 페이스 기록 📊 #가온길');
+    } catch (e) {
+      if (mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('이미지 저장 실패: $e')));
+      }
+    }
+  }
+
+  /// 📍 고도 데이터 생성 (실제 데이터가 없을 경우 시뮬레이션)
+  void _generateMockElevationData() {
+    // 실제 앱에서는 record.elevations 등을 사용해야 합니다.
+    // 여기서는 총 거리에 따라 자연스러운 고도 변화를 만듭니다.
+    final totalKm = widget.record.totalDistanceKm;
+    if (totalKm <= 0) return;
+
+    final points = 50; // 그래프 포인트 개수
+    final random = Random(42); // 고정 시드 (항상 같은 그래프 모양 유지)
+    double currentElevation = 30.0; // 시작 고도 (m)
+
+    _elevationSpots = List.generate(points, (index) {
+      final x = (index / (points - 1)) * totalKm;
+      // 랜덤하게 오르락 내리락
+      final change = (random.nextDouble() - 0.5) * 5;
+      currentElevation += change;
+      if (currentElevation < 0) currentElevation = 0; // 해수면 아래 방지
+
+      return FlSpot(x, currentElevation);
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     // 📍 그래프 Y축 범위 자동 조절 (데이터 최소/최대값 + 여유 공간)
     double minY = 0;
     double maxY = 10;
-    if (record.paceSegments.isNotEmpty) {
-      double minVal = record.paceSegments.reduce(
+    if (widget.record.paceSegments.isNotEmpty) {
+      double minVal = widget.record.paceSegments.reduce(
         (curr, next) => curr < next ? curr : next,
       );
-      double maxVal = record.paceSegments.reduce(
+      double maxVal = widget.record.paceSegments.reduce(
         (curr, next) => curr > next ? curr : next,
       );
       minY = (minVal - 0.5).floorToDouble(); // 최소값보다 0.5(30초) 아래
@@ -98,8 +240,8 @@ class RunDetailScreen extends StatelessWidget {
 
     // 📍 X축 레이블 간격 설정 (데이터가 많을 경우 겹치지 않게 조절)
     double interval = 1;
-    if (record.paceSegments.length > 10) {
-      interval = (record.paceSegments.length / 6).ceilToDouble();
+    if (widget.record.paceSegments.length > 10) {
+      interval = (widget.record.paceSegments.length / 6).ceilToDouble();
     }
 
     return Scaffold(
@@ -126,16 +268,16 @@ class RunDetailScreen extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 // 📍 지도 (Lite Mode) - 경로 표시
-                if (record.routePath.isNotEmpty)
+                if (widget.record.routePath.isNotEmpty)
                   GestureDetector(
                     onTap: () {
                       Navigator.push(
                         context,
                         MaterialPageRoute(
                           builder: (context) => _FullScreenMapScreen(
-                            routePath: record.routePath,
-                            totalDistanceKm: record.totalDistanceKm,
-                            duration: record.duration,
+                            routePath: widget.record.routePath,
+                            totalDistanceKm: widget.record.totalDistanceKm,
+                            duration: widget.record.duration,
                           ),
                         ),
                       );
@@ -161,10 +303,11 @@ class RunDetailScreen extends StatelessWidget {
                               logoClickEnable: false,
                             ),
                             onMapReady: (controller) {
+                              _mapController = controller;
                               // 경로 그리기
                               final pathOverlay = NPathOverlay(
                                 id: 'history_path',
-                                coords: record.routePath,
+                                coords: widget.record.routePath,
                                 width: 5,
                                 color: Colors.green,
                               );
@@ -172,7 +315,7 @@ class RunDetailScreen extends StatelessWidget {
 
                               // 경로 전체가 보이도록 카메라 이동
                               final bounds = NLatLngBounds.from(
-                                record.routePath,
+                                widget.record.routePath,
                               );
                               controller.updateCamera(
                                 NCameraUpdate.fitBounds(
@@ -216,7 +359,7 @@ class RunDetailScreen extends StatelessWidget {
                     child: Column(
                       children: [
                         Text(
-                          '${record.totalDistanceKm.toStringAsFixed(2)} km',
+                          '${widget.record.totalDistanceKm.toStringAsFixed(2)} km',
                           style: const TextStyle(
                             fontSize: 32,
                             fontWeight: FontWeight.bold,
@@ -229,10 +372,10 @@ class RunDetailScreen extends StatelessWidget {
                           children: [
                             _buildInfoItem(
                               '시간',
-                              _formatDuration(record.duration),
+                              _formatDuration(widget.record.duration),
                             ),
-                            _buildInfoItem('페이스', record.pace),
-                            _buildInfoItem('칼로리', '${record.calories}'),
+                            _buildInfoItem('페이스', widget.record.pace),
+                            _buildInfoItem('칼로리', '${widget.record.calories}'),
                           ],
                         ),
                       ],
@@ -249,7 +392,7 @@ class RunDetailScreen extends StatelessWidget {
                 // 그래프 영역
                 SizedBox(
                   height: 300,
-                  child: record.paceSegments.isEmpty
+                  child: widget.record.paceSegments.isEmpty
                       ? const Center(
                           child: Text('구간 기록이 부족합니다. (1km 이상 주행 필요)'),
                         )
@@ -334,7 +477,7 @@ class RunDetailScreen extends StatelessWidget {
                               ),
                               lineBarsData: [
                                 LineChartBarData(
-                                  spots: record.paceSegments
+                                  spots: widget.record.paceSegments
                                       .asMap()
                                       .entries
                                       .map(
@@ -345,6 +488,10 @@ class RunDetailScreen extends StatelessWidget {
                                       )
                                       .toList(),
                                   isCurved: true,
+                                  curveSmoothness:
+                                      0.5, // 📍 곡선을 더 부드럽게 설정 (기본값 0.35)
+                                  preventCurveOverShooting:
+                                      true, // 📍 곡선이 데이터 점을 과도하게 벗어나지 않도록 방지
                                   gradient: const LinearGradient(
                                     colors: [Colors.green, Colors.red],
                                     begin: Alignment.bottomCenter,
@@ -371,12 +518,36 @@ class RunDetailScreen extends StatelessWidget {
                         ),
                 ),
 
-                // 📍 표 영역 추가
-                if (record.paceSegments.isNotEmpty) ...[
-                  const SizedBox(height: 24),
+                // 📍 고도 그래프 영역 추가
+                if (_elevationSpots.isNotEmpty) ...[
+                  const SizedBox(height: 32),
                   const Text(
-                    '📊 상세 구간 기록',
+                    '⛰️ 고도 변화',
                     style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 16),
+                  SizedBox(height: 200, child: _buildElevationChart()),
+                ],
+
+                // 📍 표 영역 추가
+                if (widget.record.paceSegments.isNotEmpty) ...[
+                  const SizedBox(height: 24),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        '📊 상세 구간 기록',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.download_rounded),
+                        tooltip: '이미지로 저장',
+                        onPressed: () => _sharePaceTable(context),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 8),
                   _buildPaceTable(),
@@ -385,6 +556,57 @@ class RunDetailScreen extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildElevationChart() {
+    return LineChart(
+      LineChartData(
+        gridData: const FlGridData(show: false),
+        titlesData: const FlTitlesData(show: false), // 축 라벨 숨김 (깔끔하게)
+        borderData: FlBorderData(show: false),
+        lineTouchData: LineTouchData(
+          touchTooltipData: LineTouchTooltipData(
+            getTooltipColor: (touchedSpot) => Colors.blueGrey.withOpacity(0.8),
+            getTooltipItems: (touchedSpots) {
+              return touchedSpots.map((spot) {
+                return LineTooltipItem(
+                  '${spot.y.toStringAsFixed(1)}m',
+                  const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                  ),
+                );
+              }).toList();
+            },
+          ),
+        ),
+        lineBarsData: [
+          LineChartBarData(
+            spots: _elevationSpots,
+            isCurved: true,
+            curveSmoothness: 0.3,
+            color: Colors.blueGrey,
+            barWidth: 2,
+            isStrokeCapRound: true,
+            dotData: const FlDotData(show: false),
+            belowBarData: BarAreaData(
+              show: true,
+              gradient: LinearGradient(
+                colors: [
+                  Colors.blueGrey.withOpacity(0.4),
+                  Colors.blueGrey.withOpacity(0.0),
+                ],
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+              ),
+            ),
+          ),
+        ],
+        // Y축 범위 설정 (그래프 모양 예쁘게)
+        minY: _elevationSpots.map((e) => e.y).reduce(min) - 5,
+        maxY: _elevationSpots.map((e) => e.y).reduce(max) + 5,
       ),
     );
   }
@@ -400,7 +622,7 @@ class RunDetailScreen extends StatelessWidget {
           label: Text('페이스', style: TextStyle(fontWeight: FontWeight.bold)),
         ),
       ],
-      rows: record.paceSegments.asMap().entries.map((entry) {
+      rows: widget.record.paceSegments.asMap().entries.map((entry) {
         final index = entry.key;
         final km = index + 1;
         final paceVal = entry.value;
@@ -440,6 +662,176 @@ class RunDetailScreen extends StatelessWidget {
     final minutes = d.inMinutes.toString().padLeft(2, '0');
     final seconds = (d.inSeconds % 60).toString().padLeft(2, '0');
     return '$minutes:$seconds';
+  }
+}
+
+// ─────────────────────────────────────
+// 인스타그램 공유 카드 위젯 (MapScreen과 동일한 디자인)
+// ─────────────────────────────────────
+class _ShareCard extends StatelessWidget {
+  final Uint8List mapImage;
+  final String distance;
+  final String time;
+  final String pace;
+  final int calories;
+  final DateTime date;
+
+  const _ShareCard({
+    required this.mapImage,
+    required this.distance,
+    required this.time,
+    required this.pace,
+    required this.calories,
+    required this.date,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AspectRatio(
+      aspectRatio: 9 / 16,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          // 1. 배경: 지도 캡처
+          Image.memory(mapImage, fit: BoxFit.cover),
+
+          // 2. 그라데이션 오버레이
+          Container(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Colors.black.withOpacity(0.6),
+                  Colors.transparent,
+                  Colors.transparent,
+                  Colors.black.withOpacity(0.8),
+                ],
+                stops: const [0.0, 0.15, 0.6, 1.0],
+              ),
+            ),
+          ),
+
+          // 3. 상단 날짜 및 요일
+          Positioned(
+            top: 60,
+            left: 24,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${date.year}.${date.month.toString().padLeft(2, '0')}.${date.day.toString().padLeft(2, '0')}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1.0,
+                  ),
+                ),
+                Text(
+                  _getDayOfWeek(date.weekday),
+                  style: TextStyle(
+                    color: Colors.white.withOpacity(0.8),
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // 4. 하단 스탯 정보
+          Positioned(
+            bottom: 50,
+            left: 24,
+            right: 24,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Text(
+                      distance,
+                      style: const TextStyle(
+                        color: Color(0xFFCCFF00),
+                        fontSize: 96,
+                        fontWeight: FontWeight.w900,
+                        fontStyle: FontStyle.italic,
+                        height: 0.9,
+                        letterSpacing: -2.0,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    const Text(
+                      'km',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 32,
+                        fontWeight: FontWeight.bold,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
+                Container(width: 60, height: 4, color: const Color(0xFFCCFF00)),
+                const SizedBox(height: 24),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    _buildStatItem('TIME', time),
+                    _buildStatItem('PACE', pace),
+                    _buildStatItem('KCAL', '$calories'),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatItem(String label, String value) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            color: Colors.white.withOpacity(0.6),
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+            letterSpacing: 1.2,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          value,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 24,
+            fontWeight: FontWeight.bold,
+            fontStyle: FontStyle.italic,
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _getDayOfWeek(int weekday) {
+    const days = [
+      'MONDAY',
+      'TUESDAY',
+      'WEDNESDAY',
+      'THURSDAY',
+      'FRIDAY',
+      'SATURDAY',
+      'SUNDAY',
+    ];
+    return days[weekday - 1];
   }
 }
 

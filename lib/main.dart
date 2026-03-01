@@ -7,7 +7,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'firebase_options.dart';
 import 'screens/map_screen.dart';
 import 'screens/login_screen.dart';
-import 'services/location_service.dart';
+import 'screens/permission_screen.dart'; // 📍 권한 화면 import
+import 'screens/splash_screen.dart'; // 📍 스플래시 화면 import
 import 'services/auth_service.dart';
 
 // ─────────────────────────────────────────────
@@ -76,8 +77,8 @@ class AppEntryPoint extends StatefulWidget {
 }
 
 class _AppEntryPointState extends State<AppEntryPoint> {
-  bool _permissionGranted = false;
-  bool _isLoading = true;
+  bool _isPermissionGranted = false;
+  bool _isCheckingPermission = true;
 
   final AuthService _authService = AuthService();
 
@@ -88,23 +89,37 @@ class _AppEntryPointState extends State<AppEntryPoint> {
   }
 
   Future<void> _initializeApp() async {
-    // 1. 네이버 지도 SDK 초기화
-    await _initNaverMapSdk();
+    // 1. 초기화 및 스플래시 지연 (최소 2초 보여주기)
+    await Future.wait([
+      _initNaverMapSdk(),
+      Future.delayed(const Duration(seconds: 2)),
+    ]);
 
-    // 2. 위치 권한 요청
-    final granted = await LocationService.requestPermission();
+    // 2. 위치 권한 상태 확인 (요청은 PermissionScreen에서 함)
+    final status = await Permission.locationWhenInUse.status;
     if (mounted) {
       setState(() {
-        _permissionGranted = granted;
-        _isLoading = false;
+        _isPermissionGranted = status.isGranted;
+        _isCheckingPermission = false;
       });
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    if (_isCheckingPermission) {
+      return const SplashScreen(); // 📍 로딩 대신 스플래시 화면 표시
+    }
+
+    // 3. 권한이 없으면 권한 안내 화면 표시
+    if (!_isPermissionGranted) {
+      return PermissionScreen(
+        onAllPermissionsGranted: () {
+          setState(() {
+            _isPermissionGranted = true;
+          });
+        },
+      );
     }
 
     // 3. 인증 상태에 따라 화면 분기
@@ -113,17 +128,10 @@ class _AppEntryPointState extends State<AppEntryPoint> {
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Scaffold(
-            body: Center(child: CircularProgressIndicator()),
-          );
-        }
-
-        // 4. 위치 권한 확인
-        if (!_permissionGranted) {
-          return _PermissionDeniedScreen(
-            onRetry: () {
-              setState(() => _isLoading = true);
-              _initializeApp();
-            },
+            backgroundColor: Color(0xFF121212),
+            body: Center(
+              child: CircularProgressIndicator(color: Color(0xFFCCFF00)),
+            ),
           );
         }
 
@@ -134,54 +142,6 @@ class _AppEntryPointState extends State<AppEntryPoint> {
           return const LoginScreen(); // 로그인 안되어 있으면 LoginScreen으로
         }
       },
-    );
-  }
-}
-
-// ─────────────────────────────────────────────
-// 위치 권한 거부 시 안내 화면
-// ─────────────────────────────────────────────
-class _PermissionDeniedScreen extends StatelessWidget {
-  final VoidCallback onRetry;
-
-  const _PermissionDeniedScreen({super.key, required this.onRetry});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Icon(Icons.location_off, size: 80, color: Colors.grey),
-              const SizedBox(height: 24),
-              const Text(
-                '위치 권한이 필요합니다',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 12),
-              const Text(
-                '조깅 경로 기록을 위해 위치 권한을 허용해 주세요.',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.grey),
-              ),
-              const SizedBox(height: 32),
-              ElevatedButton.icon(
-                onPressed: onRetry,
-                icon: const Icon(Icons.refresh),
-                label: const Text('권한 다시 요청'),
-              ),
-              const SizedBox(height: 12),
-              TextButton(
-                onPressed: () => openAppSettings(),
-                child: const Text('설정에서 직접 허용하기'),
-              ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }

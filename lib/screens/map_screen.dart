@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_naver_map/flutter_naver_map.dart';
+import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -19,6 +20,9 @@ import '../services/route_painter.dart';
 import 'history_screen.dart';
 import 'community_screen.dart';
 import '../models/course.dart'; // Course 모델 import
+
+// 📍 목표 타입 열거형
+enum GoalType { none, distance, time }
 
 // ─────────────────────────────────────────────
 // MapScreen
@@ -51,10 +55,39 @@ class _MapScreenState extends State<MapScreen> {
   bool _isRunning = false;
   bool _isPaused = false;
 
+  // 카운트다운 상태
+  bool _isCountingDown = false;
+  int _countdownValue = 3;
+  Timer? _countdownTimer;
+  bool _isMusicPlaying = false; // 📍 음악 재생 상태
+  bool _isScreenLocked = false; // 📍 화면 잠금 상태
+
   // 서비스 및 데이터 변수
   final AuthService _authService = AuthService();
   final FirestoreService _firestoreService = FirestoreService();
   Uint8List? _lastRunMapSnapshot;
+  Color _paceColor = Colors.transparent; // 📍 페이스별 배경색
+
+  // 📍 진동 피드백 설정
+  bool _isVibrationEnabled = true; // 진동 켜기/끄기
+  int _vibrationIntervalKm = 1; // 진동 간격 (기본 1km)
+  int _lastVibrationKm = 0; // 마지막으로 진동이 울린 거리
+
+  // 📍 날씨 정보
+  Map<String, dynamic>? _weatherData;
+
+  // 📍 음성 안내(TTS) 상세 설정
+  bool _isTtsEnabled = true; // 음성 안내 켜기/끄기
+  double _ttsDistanceInterval = 1.0; // 안내 간격 (km)
+  bool _ttsIncludeDistance = true; // 거리 안내 포함
+  bool _ttsIncludePace = true; // 페이스 안내 포함
+  bool _ttsIncludeTime = false; // 시간 안내 포함
+  double _lastTtsDistanceAnnounced = 0.0; // 마지막으로 안내한 거리
+
+  // 📍 목표 설정 상태
+  GoalType _goalType = GoalType.none;
+  double _goalValue = 0.0; // 거리(km) 또는 시간(분)
+  bool _goalReached = false;
 
   // 1. 데이터 변수 선언 (실시간 계산용)
   double _totalDistance = 0.0; // meters
@@ -142,6 +175,9 @@ class _MapScreenState extends State<MapScreen> {
 
     // 2. Firestore에서 주변 코스 불러오기 (플랫폼 확장성 핵심!)
     await _loadNearbyCourses();
+
+    // 3. 날씨 정보 가져오기
+    _fetchWeather();
   }
 
   /// 📍 Firestore에서 코스 정보를 가져와 지도에 마커로 표시
@@ -298,6 +334,7 @@ class _MapScreenState extends State<MapScreen> {
     _positionStreamSubscription?.cancel();
     _flutterTts.stop();
     _timer?.cancel();
+    _countdownTimer?.cancel();
     super.dispose();
   }
 
@@ -305,9 +342,40 @@ class _MapScreenState extends State<MapScreen> {
   // 운동 제어 (Start / Pause / Resume / Stop)
   // ─────────────────────────────────────
   void _startExercise() {
+    // 카운트다운 시작
+    setState(() {
+      _isCountingDown = true;
+      _countdownValue = 3;
+    });
+
+    _speak("3", force: true);
+
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+
+      if (_countdownValue > 1) {
+        setState(() {
+          _countdownValue--;
+        });
+        _speak("$_countdownValue", force: true);
+      } else {
+        timer.cancel();
+        setState(() {
+          _isCountingDown = false;
+        });
+        _startActualRun();
+      }
+    });
+  }
+
+  void _startActualRun() {
     setState(() {
       _isRunning = true;
       _isPaused = false;
+      _isScreenLocked = false; // 잠금 상태 초기화
 
       // 📍 운동 시작 시 미리보기 경로 제거 (깔끔하게)
       if (_selectedCourseOverlay != null && _mapController != null) {
@@ -333,6 +401,9 @@ class _MapScreenState extends State<MapScreen> {
       _lastMinuteAnnounced = 0;
       _kmSplits = []; // 초기화
       _lastSplitTime = Duration.zero; // 초기화
+      _lastVibrationKm = 0; // 진동 상태 초기화
+      _lastTtsDistanceAnnounced = 0.0; // TTS 안내 상태 초기화
+      _goalReached = false; // 목표 달성 상태 초기화
 
       // 운동 시작 음성 안내
       _speak("가온길 러닝을 시작합니다.", force: true);
@@ -355,6 +426,9 @@ class _MapScreenState extends State<MapScreen> {
           ).listen((Position position) {
             final latLng = NLatLng(position.latitude, position.longitude);
 
+            // 📍 현재 속도에 따라 배경색 변경 (실시간 피드백)
+            _updateAmbientColor(position.speed);
+
             // 실시간 계산
             if (_currentRoute.points.isNotEmpty) {
               final lastPoint = _currentRoute.points.last;
@@ -374,6 +448,25 @@ class _MapScreenState extends State<MapScreen> {
             setState(() {
               _currentRoute.addPoint(latLng);
 
+              // 📍 진동 피드백 로직
+              final currentKmInt = (_totalDistance / 1000).floor();
+              if (_isVibrationEnabled &&
+                  currentKmInt > 0 &&
+                  currentKmInt % _vibrationIntervalKm == 0 &&
+                  currentKmInt > _lastVibrationKm) {
+                _lastVibrationKm = currentKmInt;
+                HapticFeedback.heavyImpact(); // 강한 진동 발생
+              }
+
+              // 📍 목표 거리 달성 체크
+              if (_goalType == GoalType.distance &&
+                  !_goalReached &&
+                  _goalValue > 0) {
+                if ((_totalDistance / 1000) >= _goalValue) {
+                  _handleGoalReached();
+                }
+              }
+
               // 1km 마다 음성 안내
               final currentKm = (_totalDistance / 1000).floor();
               if (currentKm > 0 && currentKm > _lastKmAnnounced) {
@@ -386,7 +479,21 @@ class _MapScreenState extends State<MapScreen> {
                 _lastSplitTime = nowElapsed;
 
                 _lastKmAnnounced = currentKm;
-                _announceStatus(isKmAnnounce: true);
+                // 기존 고정 음성 안내 제거 -> 아래 커스텀 로직으로 대체
+              }
+
+              // 📍 상세 음성 안내 로직 (사용자 설정 반영)
+              if (_isTtsEnabled) {
+                final currentDistKm = _totalDistance / 1000;
+                // 설정한 간격(예: 0.5km)마다 안내
+                if (currentDistKm >=
+                    _lastTtsDistanceAnnounced + _ttsDistanceInterval) {
+                  // 누적 오차 방지를 위해 현재 거리 기준으로 정렬
+                  _lastTtsDistanceAnnounced =
+                      (currentDistKm / _ttsDistanceInterval).floor() *
+                      _ttsDistanceInterval;
+                  _announceStatusCustom();
+                }
               }
             });
 
@@ -435,6 +542,7 @@ class _MapScreenState extends State<MapScreen> {
     setState(() {
       _isRunning = false;
       _isPaused = false;
+      _isScreenLocked = false; // 잠금 해제
     });
 
     // 요약 다이얼로그 표시
@@ -454,7 +562,16 @@ class _MapScreenState extends State<MapScreen> {
             currentMinute % 5 == 0 &&
             currentMinute != _lastMinuteAnnounced) {
           _lastMinuteAnnounced = currentMinute;
-          _announceStatus(isKmAnnounce: false);
+          if (_isTtsEnabled) {
+            _announceStatus(isKmAnnounce: false);
+          }
+        }
+
+        // 📍 목표 시간 달성 체크
+        if (_goalType == GoalType.time && !_goalReached && _goalValue > 0) {
+          if (_elapsed.inMinutes >= _goalValue) {
+            _handleGoalReached();
+          }
         }
       });
     }
@@ -466,6 +583,65 @@ class _MapScreenState extends State<MapScreen> {
       final pMin = secondsPerKm ~/ 60;
       final pSec = (secondsPerKm % 60).toInt();
       _pace = "$pMin'${pSec.toString().padLeft(2, '0')}''";
+    }
+  }
+
+  /// 📍 목표 달성 처리
+  void _handleGoalReached() {
+    setState(() => _goalReached = true);
+    _speak("목표를 달성했습니다! 정말 대단해요!", force: true);
+    HapticFeedback.heavyImpact();
+    _showGoalReachedDialog();
+  }
+
+  /// 📍 현재 속도(m/s)를 기반으로 배경색 결정
+  void _updateAmbientColor(double speedMps) {
+    // 멈춰있거나 속도가 너무 느리면 투명
+    if (speedMps < 0.5) {
+      _paceColor = Colors.transparent;
+      return;
+    }
+
+    // m/s -> min/km 환산: (1000 / speed) / 60
+    // 예: 3.33 m/s = 5:00 min/km
+    final paceSeconds = 1000 / speedMps;
+
+    if (paceSeconds < 300) {
+      // 5:00 미만 (Fast) -> 강렬한 퍼플 (고강도)
+      _paceColor = Colors.purpleAccent.withOpacity(0.2);
+    } else if (paceSeconds < 420) {
+      // 7:00 미만 (Moderate) -> 에너제틱 그린 (중강도)
+      _paceColor = Colors.greenAccent.withOpacity(0.2);
+    } else {
+      // 7:00 이상 (Slow) -> 차분한 시안 (저강도)
+      _paceColor = Colors.cyanAccent.withOpacity(0.2);
+    }
+  }
+
+  /// 📍 날씨 정보 가져오기
+  Future<void> _fetchWeather() async {
+    try {
+      // 위치 확인 (권한은 이미 _requestLocationPermission에서 확인됨)
+      // final position = await Geolocator.getCurrentPosition();
+
+      // 📍 실제 앱에서는 OpenWeatherMap API 등을 사용하여 실시간 날씨를 가져옵니다.
+      // 예: https://api.openweathermap.org/data/2.5/weather?lat=${position.latitude}&lon=${position.longitude}&appid=YOUR_API_KEY&units=metric
+
+      // 데모를 위한 모의 데이터 (네트워크 딜레이 시뮬레이션)
+      await Future.delayed(const Duration(seconds: 1));
+
+      if (!mounted) return;
+      setState(() {
+        // 현재 계절/시간에 맞는 가상의 날씨 데이터
+        _weatherData = {
+          'temp': 18.5,
+          'condition': '맑음',
+          'icon': Icons.wb_sunny_rounded,
+          'location': 'Seoul',
+        };
+      });
+    } catch (e) {
+      debugPrint('날씨 정보 로딩 실패: $e');
     }
   }
 
@@ -486,6 +662,34 @@ class _MapScreenState extends State<MapScreen> {
 
     await _flutterTts.speak(text);
     _lastSpeakTime = now;
+  }
+
+  /// 📍 사용자 설정에 따른 커스텀 음성 안내
+  void _announceStatusCustom() {
+    List<String> parts = [];
+
+    if (_ttsIncludeDistance) {
+      // 정수면 소수점 없이, 아니면 소수점 1자리 (예: 1km, 1.5km)
+      String distStr = _lastTtsDistanceAnnounced.toStringAsFixed(1);
+      if (distStr.endsWith('.0'))
+        distStr = distStr.substring(0, distStr.length - 2);
+      parts.add("현재 $distStr 킬로미터");
+    }
+
+    if (_ttsIncludeTime) {
+      final m = _elapsed.inMinutes;
+      final s = _elapsed.inSeconds % 60;
+      parts.add(m > 0 ? "$m분 $s초 경과" : "$s초 경과");
+    }
+
+    if (_ttsIncludePace) {
+      final ttsPace = _pace.replaceAll("'", "분 ").replaceAll("''", "초");
+      parts.add("페이스 $ttsPace");
+    }
+
+    if (parts.isNotEmpty) {
+      _speak("${parts.join(", ")}입니다.", force: true);
+    }
   }
 
   void _announceStatus({required bool isKmAnnounce}) {
@@ -547,6 +751,7 @@ class _MapScreenState extends State<MapScreen> {
         time: _formatDuration(_elapsed),
         pace: _pace,
         calories: _calories,
+        date: DateTime.now(),
       );
 
       // 3. 위젯을 이미지로 캡처 (screenshot 라이브러리 활용)
@@ -580,109 +785,147 @@ class _MapScreenState extends State<MapScreen> {
     showDialog(
       context: context,
       barrierDismissible: false, // 외부 탭으로 닫기 방지
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Row(
-          children: [
-            Icon(Icons.directions_run, color: Colors.green),
-            SizedBox(width: 8),
-            Text('오늘의 러닝 요약'),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              "총 ${(_totalDistance / 1000).toStringAsFixed(2)}km를 주행하셨습니다.",
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 16),
-            const Divider(),
-            const SizedBox(height: 16),
-            _buildSummaryItem(
-              Icons.route_outlined,
-              '${(_totalDistance / 1000).toStringAsFixed(2)} km',
-              '총 거리',
-            ),
-            const SizedBox(height: 12),
-            _buildSummaryItem(
-              Icons.timer_outlined,
-              _formatDuration(_elapsed),
-              '운동 시간',
-            ),
-            const SizedBox(height: 12),
-            _buildSummaryItem(Icons.speed_outlined, _pace, '평균 페이스'),
-            const SizedBox(height: 12),
-            _buildSummaryItem(
-              Icons.local_fire_department_outlined,
-              '$_calories kcal',
-              '소모 칼로리',
-            ),
-          ],
-        ),
-        actionsAlignment: MainAxisAlignment.center,
-        actionsPadding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-        actions: [
-          Row(
-            children: [
-              Expanded(
-                child: TextButton(
-                  onPressed: () async {
-                    try {
-                      // 1. 로컬에 저장
-                      final record = RunRecord(
-                        date: DateTime.now(),
-                        totalDistanceKm: _totalDistance / 1000,
-                        duration: _elapsed,
-                        calories: _calories,
-                        pace: _pace,
-                        paceSegments: _kmSplits, // 📍 저장 시 구간 기록 포함
-                        routePath: _currentRoute.points, // 📍 이동 경로 저장
-                      );
-                      await RunHistoryService().saveRun(record);
+      // StatefulBuilder를 사용하여 다이얼로그 내부 상태(로딩 중) 관리
+      builder: (context) => StatefulBuilder(
+        builder: (context, setStateDialog) {
+          bool isSaving = false;
 
-                      // 2. Firebase에 업로드
-                      if (_authService.currentUser != null &&
-                          _lastRunMapSnapshot != null) {
-                        await _firestoreService.uploadRunRecord(
-                          record,
-                          _authService.currentUser!,
-                          _lastRunMapSnapshot!,
-                        );
-                      }
-                    } catch (e) {
-                      debugPrint('저장/업로드 중 오류 발생 (무시하고 닫기): $e');
-                    }
-
-                    if (!context.mounted) return;
-                    Navigator.pop(context);
-                    _reset();
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('운동 기록이 성공적으로 저장되었습니다.')),
-                    );
-                  },
-                  child: const Text('저장하고 닫기'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: ElevatedButton.icon(
-                  onPressed: _shareRun,
-                  icon: const Icon(Icons.ios_share),
-                  label: const Text('공유 이미지 만들기'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFFE1306C), // 인스타 색상
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
+          return AlertDialog(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            title: const Row(
+              children: [
+                Icon(Icons.directions_run, color: Colors.green),
+                SizedBox(width: 8),
+                Text('오늘의 러닝 요약'),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  "총 ${(_totalDistance / 1000).toStringAsFixed(2)}km를 주행하셨습니다.",
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
                   ),
                 ),
+                const SizedBox(height: 16),
+                const Divider(),
+                const SizedBox(height: 16),
+                _buildSummaryItem(
+                  Icons.route_outlined,
+                  '${(_totalDistance / 1000).toStringAsFixed(2)} km',
+                  '총 거리',
+                ),
+                const SizedBox(height: 12),
+                _buildSummaryItem(
+                  Icons.timer_outlined,
+                  _formatDuration(_elapsed),
+                  '운동 시간',
+                ),
+                const SizedBox(height: 12),
+                _buildSummaryItem(Icons.speed_outlined, _pace, '평균 페이스'),
+                const SizedBox(height: 12),
+                _buildSummaryItem(
+                  Icons.local_fire_department_outlined,
+                  '$_calories kcal',
+                  '소모 칼로리',
+                ),
+              ],
+            ),
+            actionsAlignment: MainAxisAlignment.center,
+            actionsPadding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+            actions: [
+              Row(
+                children: [
+                  Expanded(
+                    child: TextButton(
+                      // 저장 중이면 버튼 비활성화
+                      onPressed: isSaving
+                          ? null
+                          : () async {
+                              setStateDialog(() {
+                                isSaving = true;
+                              });
+
+                              try {
+                                // 1. 로컬에 저장
+                                final record = RunRecord(
+                                  date: DateTime.now(),
+                                  totalDistanceKm: _totalDistance / 1000,
+                                  duration: _elapsed,
+                                  calories: _calories,
+                                  pace: _pace,
+                                  // 📍 리스트를 복사해서 저장 (참조 문제 방지)
+                                  paceSegments: List.from(_kmSplits),
+                                  routePath: List.from(_currentRoute.points),
+                                );
+                                await RunHistoryService().saveRun(record);
+
+                                // 2. Firebase에 업로드
+                                if (_authService.currentUser != null &&
+                                    _lastRunMapSnapshot != null) {
+                                  await _firestoreService.uploadRunRecord(
+                                    record,
+                                    _authService.currentUser!,
+                                    _lastRunMapSnapshot!,
+                                  );
+                                }
+
+                                // 저장이 완료되면 다이얼로그 닫기 및 초기화
+                                if (!context.mounted) return;
+                                Navigator.pop(context);
+                                _reset();
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('운동 기록이 성공적으로 저장되었습니다.'),
+                                  ),
+                                );
+                              } catch (e) {
+                                // 에러 발생 시 닫지 않고 사용자에게 알림
+                                debugPrint('저장/업로드 중 오류 발생: $e');
+                                setStateDialog(() {
+                                  isSaving = false;
+                                });
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text('저장 중 오류가 발생했습니다: $e'),
+                                  ),
+                                );
+                              }
+                            },
+                      child: isSaving
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Text('저장하고 닫기'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: _shareRun,
+                      icon: const Icon(Icons.ios_share),
+                      label: const Text('공유 이미지 만들기'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFE1306C), // 인스타 색상
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ],
-          ),
-        ],
+          );
+        },
       ),
     );
   }
@@ -719,6 +962,7 @@ class _MapScreenState extends State<MapScreen> {
         RoutePainter.clearRoute(_mapController!);
       }
       _lastRunMapSnapshot = null;
+      _paceColor = Colors.transparent;
     });
   }
 
@@ -728,46 +972,324 @@ class _MapScreenState extends State<MapScreen> {
     return '$minutes:$seconds';
   }
 
+  /// 📍 목표 설정 다이얼로그
+  void _showGoalSettingDialog() {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            return AlertDialog(
+              title: const Row(
+                children: [
+                  Icon(Icons.flag, color: Colors.green),
+                  SizedBox(width: 8),
+                  Text('목표 설정'),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // 목표 타입 선택
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      _buildGoalTypeButton(
+                        setStateDialog,
+                        GoalType.none,
+                        '없음',
+                        Icons.close,
+                      ),
+                      _buildGoalTypeButton(
+                        setStateDialog,
+                        GoalType.distance,
+                        '거리',
+                        Icons.straighten,
+                      ),
+                      _buildGoalTypeButton(
+                        setStateDialog,
+                        GoalType.time,
+                        '시간',
+                        Icons.timer,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+                  // 목표 값 설정 슬라이더
+                  if (_goalType == GoalType.distance) ...[
+                    Text(
+                      '목표 거리: ${_goalValue.toStringAsFixed(1)} km',
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    Slider(
+                      value: _goalValue,
+                      min: 1.0,
+                      max: 42.0, // 마라톤 풀코스까지
+                      divisions: 82, // 0.5km 단위
+                      activeColor: Colors.green,
+                      onChanged: (val) {
+                        setStateDialog(() => _goalValue = val);
+                      },
+                    ),
+                  ] else if (_goalType == GoalType.time) ...[
+                    Text(
+                      '목표 시간: ${_goalValue.toInt()} 분',
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    Slider(
+                      value: _goalValue,
+                      min: 10.0,
+                      max: 180.0, // 3시간까지
+                      divisions: 34, // 5분 단위
+                      activeColor: Colors.green,
+                      onChanged: (val) {
+                        setStateDialog(() => _goalValue = val);
+                      },
+                    ),
+                  ],
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    setState(() {}); // 메인 화면 갱신 (목표 상태 반영)
+                    Navigator.pop(context);
+                  },
+                  child: const Text(
+                    '설정 완료',
+                    style: TextStyle(color: Colors.green),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildGoalTypeButton(
+    StateSetter setStateDialog,
+    GoalType type,
+    String label,
+    IconData icon,
+  ) {
+    final isSelected = _goalType == type;
+    return GestureDetector(
+      onTap: () {
+        setStateDialog(() {
+          _goalType = type;
+          // 기본값 설정
+          if (type == GoalType.distance && _goalValue == 0) _goalValue = 5.0;
+          if (type == GoalType.time && _goalValue == 0) _goalValue = 30.0;
+        });
+      },
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: isSelected ? Colors.green : Colors.grey[200],
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, color: isSelected ? Colors.white : Colors.grey),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: TextStyle(
+              color: isSelected ? Colors.green : Colors.grey,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 📍 목표 달성 축하 다이얼로그
+  void _showGoalReachedDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('🎉 목표 달성!'),
+        content: const Text('설정하신 목표를 완주하셨습니다.\n정말 대단합니다!'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('확인'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 📍 진동 설정 다이얼로그 표시
+  void _showSettingsDialog() {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            return AlertDialog(
+              title: const Row(
+                children: [
+                  Icon(Icons.vibration, color: Colors.green),
+                  SizedBox(width: 8),
+                  Text('러닝 피드백 설정'),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SwitchListTile(
+                    title: const Text('진동 알림 켜기'),
+                    subtitle: const Text('목표 거리 도달 시 진동'),
+                    value: _isVibrationEnabled,
+                    activeColor: Colors.green,
+                    onChanged: (val) {
+                      setStateDialog(() => _isVibrationEnabled = val);
+                      setState(() {}); // 메인 상태 업데이트
+                    },
+                  ),
+                  if (_isVibrationEnabled)
+                    ListTile(
+                      title: const Text('진동 간격'),
+                      trailing: DropdownButton<int>(
+                        value: _vibrationIntervalKm,
+                        items: [1, 2, 3, 5, 10]
+                            .map(
+                              (e) => DropdownMenuItem(
+                                value: e,
+                                child: Text('$e km'),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (val) {
+                          if (val != null) {
+                            setStateDialog(() => _vibrationIntervalKm = val);
+                            setState(() {});
+                          }
+                        },
+                      ),
+                    ),
+                  const Divider(), // 구분선
+                  const SizedBox(height: 8),
+                  const Row(
+                    children: [
+                      Icon(Icons.record_voice_over, color: Colors.green),
+                      SizedBox(width: 8),
+                      Text('음성 안내 설정'),
+                    ],
+                  ),
+                  SwitchListTile(
+                    title: const Text('음성 안내 켜기'),
+                    value: _isTtsEnabled,
+                    activeColor: Colors.green,
+                    onChanged: (val) {
+                      setStateDialog(() => _isTtsEnabled = val);
+                      setState(() {});
+                    },
+                  ),
+                  if (_isTtsEnabled) ...[
+                    ListTile(
+                      title: const Text('안내 간격'),
+                      trailing: DropdownButton<double>(
+                        value: _ttsDistanceInterval,
+                        items: [0.5, 1.0, 2.0, 5.0]
+                            .map(
+                              (e) => DropdownMenuItem(
+                                value: e,
+                                child: Text('$e km'),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (val) {
+                          if (val != null) {
+                            setStateDialog(() => _ttsDistanceInterval = val);
+                            setState(() {});
+                          }
+                        },
+                      ),
+                    ),
+                    CheckboxListTile(
+                      title: const Text('거리 안내'),
+                      value: _ttsIncludeDistance,
+                      activeColor: Colors.green,
+                      onChanged: (val) {
+                        setStateDialog(() => _ttsIncludeDistance = val ?? true);
+                        setState(() {});
+                      },
+                    ),
+                    CheckboxListTile(
+                      title: const Text('시간 안내'),
+                      value: _ttsIncludeTime,
+                      activeColor: Colors.green,
+                      onChanged: (val) {
+                        setStateDialog(() => _ttsIncludeTime = val ?? false);
+                        setState(() {});
+                      },
+                    ),
+                    CheckboxListTile(
+                      title: const Text('페이스 안내'),
+                      value: _ttsIncludePace,
+                      activeColor: Colors.green,
+                      onChanged: (val) {
+                        setStateDialog(() => _ttsIncludePace = val ?? true);
+                        setState(() {});
+                      },
+                    ),
+                  ],
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text(
+                    '확인',
+                    style: TextStyle(color: Colors.green),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('조깅 경로 앱'),
+        title: const Text('RUNNING MODE'),
         centerTitle: true,
         actions: [
+          // 📍 목표 설정 버튼 추가
           IconButton(
-            icon: const Icon(Icons.people),
-            tooltip: '커뮤니티 피드',
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => const CommunityScreen(),
-                ),
-              );
-            },
+            icon: Icon(
+              Icons.flag,
+              color: _goalType != GoalType.none ? Colors.greenAccent : null,
+            ),
+            tooltip: '목표 설정',
+            onPressed: _showSettingsDialog, // 📍 목표 설정 다이얼로그 호출
           ),
+          // 📍 설정 버튼 추가
           IconButton(
-            icon: const Icon(Icons.history),
-            tooltip: '기록 보기',
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (context) => const HistoryScreen()),
-              );
-            },
+            icon: const Icon(Icons.settings),
+            tooltip: '러닝 설정',
+            onPressed: _showSettingsDialog,
           ),
           IconButton(
             icon: const Icon(Icons.my_location),
             tooltip: '내 위치로 이동',
             onPressed: _moveToMyLocation,
-          ),
-          IconButton(
-            icon: const Icon(Icons.logout),
-            tooltip: '로그아웃',
-            onPressed: () async {
-              await _authService.signOut();
-            },
           ),
         ],
       ),
@@ -775,6 +1297,27 @@ class _MapScreenState extends State<MapScreen> {
         children: [
           // ── 네이버 지도 ──
           NaverMap(options: _mapOptions, onMapReady: _onMapReady),
+
+          // 📍 페이스별 앰비언트 라이트 효과 (가장자리에 은은한 빛)
+          if (_isRunning)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: AnimatedContainer(
+                  duration: const Duration(seconds: 2), // 색상 변경 부드럽게
+                  decoration: BoxDecoration(
+                    gradient: RadialGradient(
+                      center: Alignment.center,
+                      radius: 1.2, // 중앙은 투명하게 유지
+                      colors: [
+                        Colors.transparent,
+                        _paceColor, // 가장자리에 색상 적용
+                      ],
+                      stops: const [0.2, 1.0],
+                    ),
+                  ),
+                ),
+              ),
+            ),
 
           // 랭킹 대시보드
           Positioned(
@@ -784,13 +1327,31 @@ class _MapScreenState extends State<MapScreen> {
             child: _buildRankingDashboard(),
           ),
 
-          // 주간 통계 대시보드 (좌측 상단)
+          // 주간 통계 및 날씨 (상단)
           Positioned(
             top: 100,
             left: 20,
             right: 20,
-            child: _buildWeeklyStatsCard(),
+            child: Row(
+              children: [
+                _buildWeeklyStatsCard(),
+                const Spacer(), // 통계와 날씨 사이 간격 자동 조절
+                _buildWeatherCard(),
+              ],
+            ),
           ),
+
+          // 📍 뮤직 미니 플레이어 (상단)
+          Positioned(top: 10, left: 20, right: 20, child: _buildMusicPlayer()),
+
+          // 📍 목표 달성 프로그레스 바 (러닝 중일 때만 표시)
+          if (_isRunning && _goalType != GoalType.none)
+            Positioned(
+              top: 160,
+              left: 20,
+              right: 20,
+              child: _buildGoalProgress(),
+            ),
 
           // 운동 정보 대시보드
           Positioned(
@@ -827,6 +1388,170 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               ),
             ),
+          ),
+
+          // 📍 화면 잠금 버튼 (러닝 중이고 잠금 상태가 아닐 때 표시)
+          if (_isRunning && !_isScreenLocked)
+            Positioned(
+              bottom: 150, // 시작/종료 버튼 우측 상단
+              right: 30,
+              child: FloatingActionButton.small(
+                heroTag: 'lock_btn',
+                backgroundColor: Colors.white,
+                onPressed: () {
+                  setState(() => _isScreenLocked = true);
+                  HapticFeedback.mediumImpact();
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('화면이 잠겼습니다. 길게 눌러서 해제하세요.'),
+                      duration: Duration(seconds: 1),
+                    ),
+                  );
+                },
+                child: const Icon(Icons.lock_outline, color: Colors.black87),
+              ),
+            ),
+
+          // 📍 화면 잠금 오버레이 (잠금 상태일 때 전체 화면 덮기)
+          if (_isScreenLocked)
+            Positioned.fill(
+              child: GestureDetector(
+                onTap: () {
+                  // 잠금 상태임을 알림 (오터치 시 힌트 제공)
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('화면이 잠겨있습니다. 자물쇠를 길게 눌러 해제하세요.'),
+                      duration: Duration(milliseconds: 500),
+                    ),
+                  );
+                },
+                // 드래그 등 다른 제스처 막기
+                onVerticalDragStart: (_) {},
+                onHorizontalDragStart: (_) {},
+                child: Container(
+                  color: Colors.black.withOpacity(0.6), // 반투명 배경으로 화면 가림
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        GestureDetector(
+                          onLongPress: () {
+                            setState(() => _isScreenLocked = false);
+                            HapticFeedback.heavyImpact();
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('잠금이 해제되었습니다.')),
+                            );
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.all(24),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.2),
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.white, width: 2),
+                            ),
+                            child: const Icon(
+                              Icons.lock_open_rounded,
+                              color: Colors.white,
+                              size: 48,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        const Text(
+                          '길게 눌러서 잠금 해제',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
+          // 카운트다운 오버레이
+          if (_isCountingDown)
+            Container(
+              color: Colors.black.withOpacity(0.8),
+              width: double.infinity,
+              height: double.infinity,
+              child: Center(
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 500),
+                  transitionBuilder:
+                      (Widget child, Animation<double> animation) {
+                        return ScaleTransition(scale: animation, child: child);
+                      },
+                  child: Text(
+                    '$_countdownValue',
+                    key: ValueKey<int>(_countdownValue),
+                    style: const TextStyle(
+                      color: Color(0xFFCCFF00), // 네온 라임
+                      fontSize: 120,
+                      fontWeight: FontWeight.w900,
+                      fontStyle: FontStyle.italic,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// 📍 목표 달성률 위젯
+  Widget _buildGoalProgress() {
+    double progress = 0.0;
+    String label = '';
+
+    if (_goalType == GoalType.distance) {
+      final distKm = _totalDistance / 1000;
+      progress = (distKm / _goalValue).clamp(0.0, 1.0);
+      label = '목표 거리 ${_goalValue}km 중 ${distKm.toStringAsFixed(2)}km';
+    } else {
+      final minutes = _elapsed.inMinutes;
+      progress = (minutes / _goalValue).clamp(0.0, 1.0);
+      label = '목표 시간 ${_goalValue.toInt()}분 중 ${minutes}분';
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.9),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                label,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 12,
+                ),
+              ),
+              Text(
+                '${(progress * 100).toInt()}%',
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: Colors.green,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          LinearProgressIndicator(
+            value: progress,
+            backgroundColor: Colors.grey[300],
+            color: Colors.green,
+            minHeight: 8,
+            borderRadius: BorderRadius.circular(4),
           ),
         ],
       ),
@@ -972,6 +1697,41 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
+  /// 📍 날씨 정보 위젯
+  Widget _buildWeatherCard() {
+    if (_weatherData == null) return const SizedBox.shrink();
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.9),
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(_weatherData!['icon'], color: Colors.orange, size: 20),
+          const SizedBox(width: 8),
+          Text(
+            '${_weatherData!['temp']}°C',
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: 14,
+              color: Colors.black87,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildInfoItem(String label, String value) {
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -992,6 +1752,101 @@ class _MapScreenState extends State<MapScreen> {
       ],
     );
   }
+
+  /// 📍 미니 뮤직 플레이어 위젯
+  Widget _buildMusicPlayer() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.8), // 다크 테마 배경
+        borderRadius: BorderRadius.circular(30),
+        border: Border.all(color: Colors.white.withOpacity(0.1)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.3),
+            blurRadius: 8,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          // 앨범 아트 (아이콘으로 대체)
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: Colors.grey[800],
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(
+              Icons.music_note,
+              color: Color(0xFFCCFF00),
+              size: 20,
+            ),
+          ),
+          const SizedBox(width: 12),
+          // 곡 정보
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Power Running Mix', // 임시 제목
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+                Text(
+                  'Spotify',
+                  style: TextStyle(
+                    color: Colors.white.withOpacity(0.6),
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // 컨트롤 버튼
+          IconButton(
+            icon: const Icon(Icons.skip_previous_rounded, color: Colors.white),
+            onPressed: () {}, // TODO: 이전 곡 연동
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+            iconSize: 28,
+          ),
+          const SizedBox(width: 16),
+          GestureDetector(
+            onTap: () {
+              setState(() {
+                _isMusicPlaying = !_isMusicPlaying;
+              });
+              // TODO: 실제 음악 앱 제어 연동 (platform channel 등 필요)
+            },
+            child: Icon(
+              _isMusicPlaying
+                  ? Icons.pause_circle_filled_rounded
+                  : Icons.play_circle_fill_rounded,
+              color: const Color(0xFFCCFF00), // 네온 라임 포인트
+              size: 42,
+            ),
+          ),
+          const SizedBox(width: 16),
+          IconButton(
+            icon: const Icon(Icons.skip_next_rounded, color: Colors.white),
+            onPressed: () {}, // TODO: 다음 곡 연동
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+            iconSize: 28,
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 // ─────────────────────────────────────
@@ -1003,6 +1858,7 @@ class _ShareCard extends StatelessWidget {
   final String time;
   final String pace;
   final int calories;
+  final DateTime date;
 
   const _ShareCard({
     required this.mapImage,
@@ -1010,6 +1866,7 @@ class _ShareCard extends StatelessWidget {
     required this.time,
     required this.pace,
     required this.calories,
+    required this.date,
   });
 
   @override
@@ -1022,58 +1879,100 @@ class _ShareCard extends StatelessWidget {
           // 1. 배경: 지도 캡처
           Image.memory(mapImage, fit: BoxFit.cover),
 
-          // 2. 어두운 그라데이션 오버레이
+          // 2. 그라데이션 오버레이 (상단 & 하단)
           Container(
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
                 colors: [
+                  Colors.black.withOpacity(0.6),
                   Colors.transparent,
-                  Colors.black.withOpacity(0.2),
+                  Colors.transparent,
                   Colors.black.withOpacity(0.8),
                 ],
-                stops: const [0.4, 0.6, 1.0],
+                stops: const [0.0, 0.15, 0.6, 1.0],
               ),
             ),
           ),
 
-          // 3. 중앙 로고
-          const Center(
-            child: Text(
-              '가온길',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 80,
-                fontWeight: FontWeight.bold,
-                fontStyle: FontStyle.italic,
-                shadows: [Shadow(blurRadius: 10.0, color: Colors.black54)],
-              ),
-            ),
-          ),
-
-          // 4. 하단 정보
+          // 3. 상단 날짜 및 요일
           Positioned(
-            bottom: 40,
-            left: 32,
-            right: 32,
+            top: 60,
+            left: 24,
             child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                Text(
+                  '${date.year}.${date.month.toString().padLeft(2, '0')}.${date.day.toString().padLeft(2, '0')}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1.0,
+                  ),
+                ),
+                Text(
+                  _getDayOfWeek(date.weekday),
+                  style: TextStyle(
+                    color: Colors.white.withOpacity(0.8),
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // 4. 하단 스탯 정보 (인스타 감성)
+          Positioned(
+            bottom: 50,
+            left: 24,
+            right: 24,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // 메인 거리 표시 (압도적인 크기)
                 Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  crossAxisAlignment: CrossAxisAlignment.end,
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
                   children: [
-                    _buildStatItem('거리', distance, 'km'),
-                    _buildStatItem('시간', time, ''),
+                    Text(
+                      distance,
+                      style: const TextStyle(
+                        color: Color(0xFFCCFF00), // 네온 라임
+                        fontSize: 96,
+                        fontWeight: FontWeight.w900,
+                        fontStyle: FontStyle.italic,
+                        height: 0.9,
+                        letterSpacing: -2.0,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    const Text(
+                      'km',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 32,
+                        fontWeight: FontWeight.bold,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
                   ],
                 ),
+                const SizedBox(height: 20),
+
+                // 구분선
+                Container(width: 60, height: 4, color: const Color(0xFFCCFF00)),
                 const SizedBox(height: 24),
+
+                // 서브 정보 (시간, 페이스, 칼로리)
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    _buildStatItem('페이스', pace, ''),
-                    _buildStatItem('칼로리', '$calories', 'kcal'),
+                    _buildStatItem('TIME', time),
+                    _buildStatItem('PACE', pace),
+                    _buildStatItem('KCAL', '$calories'),
                   ],
                 ),
               ],
@@ -1084,40 +1983,43 @@ class _ShareCard extends StatelessWidget {
     );
   }
 
-  Widget _buildStatItem(String label, String value, String unit) {
+  Widget _buildStatItem(String label, String value) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
           label,
-          style: TextStyle(color: Colors.white.withOpacity(0.8), fontSize: 16),
+          style: TextStyle(
+            color: Colors.white.withOpacity(0.6),
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+            letterSpacing: 1.2,
+          ),
         ),
         const SizedBox(height: 4),
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.baseline,
-          textBaseline: TextBaseline.alphabetic,
-          children: [
-            Text(
-              value,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 36,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            if (unit.isNotEmpty) const SizedBox(width: 4),
-            if (unit.isNotEmpty)
-              Text(
-                unit,
-                style: TextStyle(
-                  color: Colors.white.withOpacity(0.8),
-                  fontSize: 16,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-          ],
+        Text(
+          value,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 24,
+            fontWeight: FontWeight.bold,
+            fontStyle: FontStyle.italic,
+          ),
         ),
       ],
     );
+  }
+
+  String _getDayOfWeek(int weekday) {
+    const days = [
+      'MONDAY',
+      'TUESDAY',
+      'WEDNESDAY',
+      'THURSDAY',
+      'FRIDAY',
+      'SATURDAY',
+      'SUNDAY',
+    ];
+    return days[weekday - 1];
   }
 }

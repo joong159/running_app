@@ -67,11 +67,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 ? const CircularProgressIndicator()
                 : ElevatedButton.icon(
                     onPressed: _handleGoogleSignIn,
-                    icon: Image.asset(
-                      'assets/google_logo.png',
-                      height: 24,
-                      width: 24,
-                    ),
+                    icon: const Icon(Icons.login, color: Colors.red),
                     label: const Text('Google 계정으로 시작하기'),
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(
